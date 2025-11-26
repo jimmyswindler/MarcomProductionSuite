@@ -33,8 +33,8 @@ paths:
   icon_I_path: './_CONFIG/icon_I.pdf'
   icon_J_path: './_CONFIG/icon_J.pdf'
 
-  # dynamic_build_root: '/Volumes/AraxiVolume_Jobs/Jobs/DigimasterProductionNew/MARCOM orders/' # production path
-  dynamic_build_root: './'   # testing path
+  dynamic_build_root: '/Volumes/AraxiVolume_Jobs/Jobs/DigimasterProductionNew/MARCOM orders/' # production path
+  # dynamic_build_root: './'   # testing path
   
   dynamic_job_structure:
     job_tickets: "_JobTickets"
@@ -220,6 +220,7 @@ product_ids:
   LargeFormat:
     - "5"
     - "6"
+    - "22"
     - "68"
     - "80"
     - "89"
@@ -312,6 +313,7 @@ product_ids:
     - "4505"
     - "4506"
     - "4507"
+    - "4508"
     - "4520"
     - "4534"
     - "4544"
@@ -328,6 +330,7 @@ product_ids:
     - "4636"
     - "4641"
     - "4648"
+    - "4656"
     - "4658"
     - "4665"
     - "4666"
@@ -341,6 +344,7 @@ product_ids:
     - "4710"
     - "4744"
     - "4815"
+    - "4817"
 
   16ptBusinessCard:
     - "1"

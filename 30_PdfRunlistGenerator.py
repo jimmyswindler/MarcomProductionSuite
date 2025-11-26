@@ -299,7 +299,7 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
             order_gap = 0.1 * inch
             store_gap = 0.25 * inch # Was 'after_block_gap'
             
-            order_box_line_width = 1.0; frag_font_size = 9; text_cell_padding = 5
+            order_box_line_width = 2.0; frag_font_size = 9; text_cell_padding = 5
             page_bottom_margin_y = margin + footer_height # Y-coord of the top of the footer
             
             # --- NEW v11: Metrics for co-located frag messages ---
@@ -484,7 +484,7 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
                         # --- Close the PREVIOUS store box ---
                         c.setLineWidth(order_box_line_width)
                         # --- MODIFIED v12.2: Restored Main Data Box (Location 1) ---
-                        c.rect(margin + frame_padding, y_pos, printable_width - (2 * frame_padding), store_start_y - y_pos, stroke=1, fill=0)
+                        c.roundRect(margin + frame_padding, y_pos, printable_width - (2 * frame_padding), store_start_y - y_pos, 0.125*inch, stroke=1, fill=0)
                         
                         # --- Build and Draw Frag Messages for PREVIOUS store ---
                         lines_to_draw = _build_fragmentation_lines(entities_in_current_store_box, store_report_map, sheet_name)
@@ -494,15 +494,6 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
                                                               frag_msg_start_x, frag_msg_drawable_width, 
                                                               page_bottom_margin_y, 
                                                               trigger_page_break_for_messages)
-                        
-                        if did_break:
-                            # The message block triggered a page break.
-                            # The *current* row (index) hasn't been processed.
-                            # We need to start this row on the new page.
-                            current_row_index = index
-                            page_has_ended = True
-                            is_continuing_store_box = False # Starting a fresh store
-                            break # Exit inner 'for' loop
                         
                         # --- Draw LARGE STORE GAP ---
                         if y_pos - store_gap < page_bottom_content_area_y:
@@ -642,7 +633,7 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
                 
                 # --- MODIFIED v12.2: Restored Main Data Box (Location 2) ---
                 # --- AND CRITICAL FIX: Changed store_start_y_on_page to store_start_y ---
-                c.rect(margin + frame_padding, y_pos, printable_width - (2 * frame_padding), store_start_y - y_pos, stroke=1, fill=0)
+                c.roundRect(margin + frame_padding, y_pos, printable_width - (2 * frame_padding), store_start_y - y_pos, 0.125*inch, stroke=1, fill=0)
                 
                 # --- Check if we finished *all* rows in the sheet ---
                 if not page_has_ended:

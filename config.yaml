@@ -33,8 +33,8 @@ paths:
   icon_I_path: './_CONFIG/icon_I.pdf'
   icon_J_path: './_CONFIG/icon_J.pdf'
 
-  # dynamic_build_root: '/Volumes/AraxiVolume_Jobs/Jobs/DigimasterProductionNew/MARCOM orders/' # production path
-  dynamic_build_root: './'   # testing path
+  dynamic_build_root: '/Volumes/AraxiVolume_Jobs/Jobs/DigimasterProductionNew/MARCOM orders/' # production path
+    # dynamic_build_root: './'   # testing path
   
   dynamic_job_structure:
     job_tickets: "_JobTickets"
@@ -258,6 +258,7 @@ product_ids:
     - "2568"
     - "2580"
     - "2582"
+    - "2600"
     - "2626"
     - "2641"
     - "2771"
@@ -325,6 +326,7 @@ product_ids:
     - "4605"
     - "4606"
     - "4612"
+    - "4613"
     - "4633"
     - "4635"
     - "4636"

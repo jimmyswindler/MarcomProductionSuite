@@ -99,6 +99,7 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
 
     c = canvas.Canvas(pdf_path, pagesize=ELEVENSEVENTEEN); width, height = ELEVENSEVENTEEN
     margin = 0.375 * inch; frame_padding = 0.05 * inch; printable_width = width - 2 * margin; header_padding = 0.05 * inch
+    store_padding = 5 # NEW: Padding inside the store box
     col_names = config.get('column_names', {}); 
     col_order_num = col_names.get('order_number'); 
     col_base_job = 'Base Job Ticket Number'
@@ -122,7 +123,7 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
     # Calculate width available for dynamic columns (SKU + Desc)
     # --- UPDATED: Use new key for Product ID ---
     fixed_cols_width = default_widths['Job\nNumber'] + default_widths['Order\nNumber'] + default_widths['Store\nNumber'] + default_widths['Product\nID'] + default_widths['Qty']
-    available_table_width = (printable_width - (2 * frame_padding)) - fixed_cols_width
+    available_table_width = (printable_width - (2 * frame_padding) - (2 * store_padding)) - fixed_cols_width
     
     # Total width requested by dynamic columns
     dynamic_cols_default_width = default_widths[sku_col] + default_widths[desc_col]
@@ -289,21 +290,21 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
             ship_date_str = earliest_ship_date.strftime('%a %m/%d/%Y') if pd.notna(earliest_ship_date) else "N/A"
 
             # --- Define Layout Metrics ---
-            header_height, footer_height, row_height, table_header_height = 1.25*inch, 0.5*inch, 0.25*inch, 0.5*inch
+            header_height, footer_height, row_height, table_header_height = 1.25*inch, 0.5*inch, 0.22*inch, 0.5*inch
             
             manifest_line_height_factor = 1.2
             
             # --- NEW v11: Gap definitions ---
-            header_gap = 0.1 * inch
-            job_gap = 0.05 * inch
-            order_gap = 0.1 * inch
-            store_gap = 0.25 * inch # Was 'after_block_gap'
+            header_gap = 0.22 * inch
+            job_gap = 0.22 * inch
+            order_gap = 0.22 * inch
+            store_gap = 0.22 * inch
             
             order_box_line_width = 2.0; frag_font_size = 9; text_cell_padding = 5
             page_bottom_margin_y = margin + footer_height # Y-coord of the top of the footer
             
             # --- NEW v11: Metrics for co-located frag messages ---
-            frag_msg_font_size = 16
+            frag_msg_font_size = 14
             frag_msg_line_height = frag_msg_font_size * 1.3
             frag_msg_start_x = margin + frame_padding + 5
             frag_msg_drawable_width = printable_width - (2 * frame_padding) - 10
@@ -357,7 +358,7 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
                 # c.line(margin, height-margin-header_height, width-margin, height-margin-header_height)
                 # --- End Header ---
 
-                y_pos = height - margin - header_height; x_pos = margin + frame_padding
+                y_pos = height - margin - header_height; x_pos = margin + frame_padding + store_padding
                 
                 # --- Draw Table Header ---
                 font_size_header = 11; c.setFont("Helvetica-Bold", font_size_header)
@@ -447,8 +448,8 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
                 y_pos -= header_gap
                 
                 # --- MODIFIED v12.1: Define line coordinates for page ---
-                row_line_start_x = margin + frame_padding
-                row_line_end_x = width - margin - frame_padding
+                row_line_start_x = margin + frame_padding + store_padding
+                row_line_end_x = width - margin - frame_padding - store_padding
                 
                 # --- Set starting Y for the first box on the page ---
                 store_start_y_on_page = y_pos
@@ -456,6 +457,7 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
                     # This store box is continued from the last page,
                     # so its "start" is the top of the content area.
                     store_start_y = y_pos
+                    y_pos -= store_padding # NEW: Top padding
                     is_continuing_store_box = False # Reset flag
                 
                 font_size_row = 10
@@ -474,6 +476,7 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
                     if current_store is None:
                         current_store, current_order, current_job = row_store, row_order, row_job
                         store_start_y = y_pos # This is the top of the *very first* box
+                        y_pos -= store_padding # NEW: Top padding
                         
                     # =========================================================
                     # --- 1. Check for State Change (Store, Order, Job) ---
@@ -484,7 +487,8 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
                         # --- Close the PREVIOUS store box ---
                         c.setLineWidth(order_box_line_width)
                         # --- MODIFIED v12.2: Restored Main Data Box (Location 1) ---
-                        c.roundRect(margin + frame_padding, y_pos, printable_width - (2 * frame_padding), store_start_y - y_pos, 0.125*inch, stroke=1, fill=0)
+                        y_pos -= store_padding # NEW: Bottom padding
+                        c.rect(margin + frame_padding, y_pos, printable_width - (2 * frame_padding), store_start_y - y_pos, stroke=1, fill=0)
                         
                         # --- Build and Draw Frag Messages for PREVIOUS store ---
                         lines_to_draw = _build_fragmentation_lines(entities_in_current_store_box, store_report_map, sheet_name)
@@ -504,12 +508,14 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
                             break # Exit inner 'for' loop
                         
                         # --- MODIFIED v12.1: Draw line above gap ---
+                        c.setLineWidth(0.5) # FIX: Ensure thin line
                         c.line(row_line_start_x, y_pos, row_line_end_x, y_pos)
                         y_pos -= store_gap
                         
                         # --- Update state for NEW store ---
                         current_store, current_order, current_job = row_store, row_order, row_job
                         store_start_y = y_pos # This is the top of the new box
+                        y_pos -= store_padding # NEW: Top padding
                         entities_in_current_store_box.clear() # Reset collector
 
                     # --- B. Check for NEW ORDER (within same store) ---
@@ -522,6 +528,7 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
                             break # Exit inner 'for' loop
                             
                         # --- MODIFIED v12.1: Draw line above gap ---
+                        c.setLineWidth(0.5) # FIX: Ensure thin line
                         c.line(row_line_start_x, y_pos, row_line_end_x, y_pos)
                         y_pos -= order_gap
                         
@@ -538,6 +545,7 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
                             break # Exit inner 'for' loop
                         
                         # --- MODIFIED v12.1: Draw line above gap ---
+                        c.setLineWidth(0.5) # FIX: Ensure thin line
                         c.line(row_line_start_x, y_pos, row_line_end_x, y_pos)
                         y_pos -= job_gap
                         
@@ -557,7 +565,7 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
                     # =========================================================
                     # --- 3. Draw The Row ---
                     # =========================================================
-                    x_pos = margin + frame_padding
+                    x_pos = margin + frame_padding + store_padding
                     
                     # --- MODIFIED v12.1: Draw line *above* every row ---
                     c.line(row_line_start_x, y_pos, row_line_end_x, y_pos)
@@ -617,6 +625,11 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
                         
                         x_pos += col_width
                     
+                    # --- NEW: Draw Right and Bottom borders for the row ---
+                    c.setLineWidth(0.5)
+                    c.line(row_line_end_x, y_pos, row_line_end_x, y_pos - row_height) # Right
+                    c.line(row_line_start_x, y_pos - row_height, row_line_end_x, y_pos - row_height) # Bottom
+                    
                     c.setFont("Helvetica", font_size_row) # Reset font
                     y_pos -= row_height
                     
@@ -633,7 +646,8 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
                 
                 # --- MODIFIED v12.2: Restored Main Data Box (Location 2) ---
                 # --- AND CRITICAL FIX: Changed store_start_y_on_page to store_start_y ---
-                c.roundRect(margin + frame_padding, y_pos, printable_width - (2 * frame_padding), store_start_y - y_pos, 0.125*inch, stroke=1, fill=0)
+                y_pos -= store_padding # NEW: Bottom padding
+                c.rect(margin + frame_padding, y_pos, printable_width - (2 * frame_padding), store_start_y - y_pos, stroke=1, fill=0)
                 
                 # --- Check if we finished *all* rows in the sheet ---
                 if not page_has_ended:

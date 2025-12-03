@@ -385,8 +385,14 @@ def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, to
     # --- MODIFIED: Value column X position is based on the label's right edge ---
     x_value_col = x_label_right_edge + 10 # 10-point gap after the right-aligned edge
     
+    # --- NEW: Barcode layout constants ---
+    barcode_w = 1.75 * 72
+    barcode_h = 0.35 * 72
+    barcode_gap = 10
+    
     # Calculate the max width for the wrapping values
-    max_value_width = (PAGE_W - RIGHT_INDENT) - x_value_col
+    # Subtract barcode width and gap from the available space
+    max_value_width = (PAGE_W - RIGHT_INDENT - barcode_w - barcode_gap) - x_value_col
 
     for row in ticket_rows:
         y = new_page_check(y, min_y_from_bottom=1.5*72) # Need more space for wrapped items
@@ -398,10 +404,34 @@ def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, to
         qty_part = f"Qty: {str(row.get('quantity_ordered', ''))}"
         sku_label, sku_value = "SKU:", str(row.get("sku", ""))
         sku_desc_label, sku_desc_value = "SKU Desc:", clean_text(row.get("sku_description", ""))
+        order_item_id = str(row.get("order_item_id", "")).strip() # NEW: Get order_item_id
 
         # --- Draw static parts (Item and Qty) ---
         page.insert_text(fitz.Point(x_item_col, current_y), item_part, fontname=line_style[0], fontsize=line_style[1])
         page.insert_text(fitz.Point(x_qty_col, current_y), qty_part, fontname=fname_style[0], fontsize=fname_style[1])
+
+        # --- NEW: Draw Barcode (Right Aligned) ---
+        barcode_bottom_y = current_y # Track where the barcode ends
+        if order_item_id:
+            try:
+                # Position: Right aligned
+                barcode_x0 = PAGE_W - RIGHT_INDENT - barcode_w
+                
+                # Draw Barcode
+                rect = fitz.Rect(barcode_x0, current_y, barcode_x0 + barcode_w, current_y + barcode_h)
+                with fitz.open("pdf", _create_barcode_pdf_in_memory(order_item_id, barcode_w, barcode_h)) as barcode_doc:
+                    page.show_pdf_page(rect, barcode_doc, 0)
+                
+                # Draw Text below barcode
+                text_y = rect.y1 + 2 # slightly below barcode
+                text_len = fitz.get_text_length(order_item_id, fontname='helvetica', fontsize=9)
+                # Center text under barcode
+                text_x = barcode_x0 + (barcode_w - text_len) / 2
+                page.insert_text(fitz.Point(text_x, text_y + 8), order_item_id, fontname='helvetica', fontsize=9)
+                
+                barcode_bottom_y = text_y + 10 # Update bottom tracking
+            except Exception as e:
+                print(f"Error generating line item barcode for {order_item_id}: {e}")
 
         # --- MODIFIED: Draw SKU Desc (with wrapping) ---
         if sku_desc_value:
@@ -444,10 +474,10 @@ def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, to
             current_y = line_y + line_item_height
         
         # --- Draw separator line ---
-        # Use the *last* y position text was drawn at (line_y)
-        # If both fields were blank, line_y is still the original 'y'
-        # We add padding, draw the line, and add more padding
-        y = line_y + 0.125*72 
+        # Use the *lowest* y position (either text or barcode)
+        final_y = max(line_y, barcode_bottom_y)
+        
+        y = final_y + 0.125*72 
         page.draw_line(fitz.Point(LEFT_INDENT, y), fitz.Point(PAGE_W - RIGHT_INDENT, y)); 
         y += 0.1875*72
     

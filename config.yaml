@@ -33,12 +33,8 @@ paths:
   icon_I_path: './_CONFIG/icon_I.pdf'
   icon_J_path: './_CONFIG/icon_J.pdf'
 
-  dynamic_build_root: '/Volumes/AraxiVolume_Jobs/Jobs/DigimasterProductionNew/MARCOM orders/' # production path
-<<<<<<< HEAD
-    # dynamic_build_root: './'   # testing path
-=======
-  #dynamic_build_root: './'   # testing path
->>>>>>> origin/master
+  # dynamic_build_root: '/Volumes/AraxiVolume_Jobs/Jobs/DigimasterProductionNew/MARCOM orders/' # production path
+  dynamic_build_root: './'   # testing path
   
   dynamic_job_structure:
     job_tickets: "_JobTickets"
@@ -190,6 +186,7 @@ column_names:
   product_description: "product_description"
   sku: "sku"
   order_date: "order_date"
+  order_item_id: "order_item_id"
   ship_date: "ship_date"
   one_up_output_file_url: "1-up_output_file_url"
   

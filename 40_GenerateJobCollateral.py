@@ -256,7 +256,7 @@ def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, to
             # --- MODIFIED: Barcode section now starts from the right-aligned ship date ---
             center_x = PAGE_W - RIGHT_INDENT - (ship_text_len / 2)
             y = y_top_line + 20 # Start barcodes below the top line
-            barcode_w, barcode_h = 2.0*72, 0.5*72
+            barcode_w, barcode_h = 2.0*72, 0.375*72
             
             # --- MODIFIED: Order Number barcode is still drawn, but the text is different ---
             if order_number: # Use the numeric-only order_number for the barcode
@@ -387,7 +387,7 @@ def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, to
     
     # --- NEW: Barcode layout constants ---
     barcode_w = 1.75 * 72
-    barcode_h = 0.35 * 72
+    barcode_h = 0.25 * 72
     barcode_gap = 10
     
     # Calculate the max width for the wrapping values
@@ -418,10 +418,10 @@ def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, to
                 barcode_x0 = PAGE_W - RIGHT_INDENT - barcode_w
                 
                 # Draw Barcode
-                rect = fitz.Rect(barcode_x0, current_y, barcode_x0 + barcode_w, current_y + barcode_h)
+                y_offset = -2  # Move up by 2 points
+                rect = fitz.Rect(barcode_x0, current_y + y_offset, barcode_x0 + barcode_w, current_y + barcode_h + y_offset)
                 with fitz.open("pdf", _create_barcode_pdf_in_memory(order_item_id, barcode_w, barcode_h)) as barcode_doc:
                     page.show_pdf_page(rect, barcode_doc, 0)
-                
                 # Draw Text below barcode
                 text_y = rect.y1 + 2 # slightly below barcode
                 text_len = fitz.get_text_length(order_item_id, fontname='helvetica', fontsize=9)
@@ -731,6 +731,10 @@ def main(input_excel_path, files_base_path, tickets_base_path, central_config_js
         for sheet_name in xls.sheet_names:
             print(f"\nProcessing sheet: {sheet_name}")
             df = pd.read_excel(xls, sheet_name=sheet_name)
+            if 'order_item_id' in df.columns:
+                df['order_item_id'] = df['order_item_id'].astype(str).str.strip()
+                # Remove trailing .0 that comes from float conversion
+                df['order_item_id'] = df['order_item_id'].apply(lambda x: x[:-2] if x.endswith('.0') else x)
             print(f"    - Discovered {len(df)} rows.")
 
             # --- Fix: Check for empty dataframe *before* trying to parse columns ---

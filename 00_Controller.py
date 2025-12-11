@@ -288,7 +288,12 @@ def main_workflow():
         # --- Stage 3a: Generate Job Collateral (Unchanged) ---
         # Note: This script now receives the full paths built from the config
         logging.info("Starting Stage 3a: Generate Job Collateral")
-        s3a_config_subset = {'WATERMARK_PATH': paths.get('watermark_path')}
+        s3a_config_subset = {
+            'WATERMARK_PATH': paths.get('watermark_path'),
+            'CALIBRI_LIGHT_PATH': paths.get('calibri_light_font_path'), # <-- ADDED
+            'CALIBRI_BOLD_PATH': paths.get('calibri_bold_font_path')    # <-- ADDED
+        }
+        
         s3a_args = [
             bundled_report_path, 
             oneup_files_dir,       # <-- Pass config-driven path

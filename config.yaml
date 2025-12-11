@@ -21,6 +21,8 @@ paths:
   full_box_icon_path: './_CONFIG/full box.pdf'
   imposition_profile_path: './_CONFIG/TXRH BB 25up GangRun.json'
   marks_template_path: './_CONFIG/25up_marks_template_13x19.pdf'
+  calibri_light_font_path: './_CONFIG/font/Calibri-Light.ttf'
+  calibri_bold_font_path: './_CONFIG/font/Calibri-Bold.ttf'
   
   icon_A_path: './_CONFIG/icon_A.pdf'
   icon_B_path: './_CONFIG/icon_B.pdf'

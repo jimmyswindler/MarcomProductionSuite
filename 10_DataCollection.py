@@ -123,6 +123,7 @@ def preprocess_data(dataframes: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFra
         if 'sku' in df.columns:
             df['sku'] = df['sku'].astype(str)
         if 'order_item_id' in df.columns:
+            # CRITICAL: Ensure this remains 'Int64' to allow for pd.NA (missing values)
             df['order_item_id'] = pd.to_numeric(df['order_item_id'], errors='coerce').astype('Int64')
     print("\nPre-processing complete: Ensured key columns have consistent data types.") # Use print
     return dataframes
@@ -157,6 +158,35 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if 'job_ticket_number' in df.columns and 'sku' in df.columns:
         df = df.sort_values(by=['job_ticket_number', 'sku'], ascending=True)
     return df
+
+# --- NEW: Function to generate the box_X columns ---
+def generate_box_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Creates the eight new box_X columns by concatenating the numeric 
+    order_item_id (as a string) with a single uppercase letter.
+    """
+    print("\nGenerating box_A through box_H columns...")
+    
+    if 'order_item_id' not in df.columns:
+        print("WARNING: 'order_item_id' column not found. Skipping box column generation.")
+        return df
+        
+    # Convert 'order_item_id' to string, replacing <NA> with an empty string.
+    # The .astype(str) conversion from Int64 results in the literal string "<NA>" for nulls.
+    order_item_str = df['order_item_id'].astype(str).str.replace('<NA>', '').str.replace('nan', '')
+    
+    box_cols_and_suffixes = {
+        'box_A': 'A', 'box_B': 'B', 'box_C': 'C', 'box_D': 'D',
+        'box_E': 'E', 'box_F': 'F', 'box_G': 'G', 'box_H': 'H'
+    }
+    
+    for col_name, suffix in box_cols_and_suffixes.items():
+        # Concatenate the string value (which is numeric or empty) with the suffix
+        df[col_name] = order_item_str + suffix
+        
+    print("✓ Box column generation complete.")
+    return df
+# --- END NEW FUNCTION ---
 
 def clean_dataframe_for_output(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -233,6 +263,10 @@ def main(staging_dir: str, file_paths_map: Dict[str, str]) -> None:
         all_data = preprocess_data(all_data)
         merged_df = merge_data(all_data)
         final_report_df = finalize_dataframe(merged_df)
+        
+        # --- NEW STEP: Generate the box columns ---
+        final_report_df = generate_box_columns(final_report_df)
+        # --- END NEW STEP ---
 
         # 3. Dynamic file naming
         output_file_name = f'Consolidated_Report_{datetime.now().strftime("%Y-%m-%d")}.xlsx'

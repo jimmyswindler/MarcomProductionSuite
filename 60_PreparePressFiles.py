@@ -1,36 +1,27 @@
 # 60_PreparePressFiles.py
 import os
-import time
 import shutil
 import re
 import pandas as pd
 import traceback
 import math
-from datetime import datetime, timedelta
-from io import BytesIO
 import sys
-from itertools import groupby
 import argparse
 import json
+from io import BytesIO
 
-# PDF Libraries
-import fitz  # PyMuPDF
-from pypdf import PdfReader, PdfWriter, PageObject, Transformation
-from pypdf.generic import DictionaryObject, NameObject, RectangleObject
-from reportlab.lib.pagesizes import letter, landscape
-from reportlab.lib.units import inch
-from reportlab.lib.utils import ImageReader
-from PIL import Image
+import utils_ui
 
-# ReportLab Barcode Library
 try:
+    import fitz
+    from pypdf import PdfReader, PdfWriter, PageObject, Transformation
+    from pypdf.generic import RectangleObject
     from reportlab.graphics.barcode import code128
     from reportlab.pdfgen import canvas as rl_canvas
 except ImportError:
-    print("FATAL ERROR: Required library for barcodes not found. Please ensure 'reportlab' is installed.")
+    utils_ui.print_error("Required library not found: pymupdf, pypdf, reportlab")
     sys.exit(1)
 
-# --- Define the string that identifies a gang run sheet ---
 GANG_RUN_TRIGGER = "-GR-"
 
 # Configuration for Header Pages
@@ -41,291 +32,163 @@ HEADER_PAGE_HEIGHT = 3.75 * 72
 HEADER_TRIM_WIDTH = 2 * 72
 HEADER_TRIM_HEIGHT = 3.5 * 72
 
-# --- Fixed Layout Constants (Added for Manual Control) ---
-FN_FONT_SIZE = 12         # Filename font size
-QTY_FONT_SIZE = 7         # Total Qty font size
-STORE_FONT_SIZE = 12      # Store number font size
-ORDER_FONT_SIZE = 7       # Order number font size
-BARCODE_TEXT_SIZE = 6     # Human-readable barcode text
-BARCODE_HEIGHT = 18       # Height of the barcode bars
-ICON_HEIGHT = 18          # Height of the box icons
-BLOCK_SPACING = 6         # Vertical gap between component blocks
-LINE_SPACING = 2          # Vertical gap between lines within a block
+# Fixed Layout Constants
+FN_FONT_SIZE, QTY_FONT_SIZE, STORE_FONT_SIZE = 12, 7, 12
+ORDER_FONT_SIZE, BARCODE_TEXT_SIZE = 7, 6
+BARCODE_HEIGHT, ICON_HEIGHT = 18, 18
+BLOCK_SPACING, LINE_SPACING = 6, 2
 
-# Barcode Helper Function
 def _create_barcode_pdf_in_memory(data_string, width, height):
-    """Generates a Code 128 barcode PDF in memory using ReportLab."""
-    buffer = BytesIO()
-    c = rl_canvas.Canvas(buffer, pagesize=(width, height))
+    buffer = BytesIO(); c = rl_canvas.Canvas(buffer, pagesize=(width, height))
     barcode = code128.Code128(data_string, barHeight=height, barWidth=1.4) 
-    barcode_actual_width = barcode.width 
-    x_centered = (width - barcode_actual_width) / 2
-    barcode.drawOn(c, x_centered, 0)
-    c.save()
-    buffer.seek(0)
+    barcode.drawOn(c, (width - barcode.width) / 2, 0)
+    c.save(); buffer.seek(0)
     return buffer
 
 def create_header_page(pdf_path, order_number=None, segment=None, total_segments=None, total_quantity=None, background_color=None, store_number=None, half_box_icon_path=None, full_box_icon_path=None, box_value=None):
-    """
-    Creates a new PDF page in memory to serve as a header with FIXED layout dimensions.
-    """
-    header_doc = None
-    src_doc = None
+    header_doc, src_doc = None, None
     try:
-        header_doc = fitz.open()
-        header_page = header_doc.new_page(width=HEADER_PAGE_WIDTH, height=HEADER_PAGE_HEIGHT)
+        header_doc = fitz.open(); header_page = header_doc.new_page(width=HEADER_PAGE_WIDTH, height=HEADER_PAGE_HEIGHT)
+        if background_color and len(background_color) == 4: header_page.draw_rect(header_page.rect, color=background_color, fill=background_color)
         
-        if background_color and len(background_color) == 4:
-            header_page.draw_rect(header_page.rect, color=background_color, fill=background_color)
-            
-        p1_rect, p2_rect = None, None
-        trim_x_margin = (HEADER_PAGE_WIDTH - HEADER_TRIM_WIDTH) / 2
-        trim_y_margin = (HEADER_PAGE_HEIGHT - HEADER_TRIM_HEIGHT) / 2
-        trim_left_edge = trim_x_margin
-        trim_right_edge = HEADER_PAGE_WIDTH - trim_x_margin
-        trim_top_edge = trim_y_margin
-        trim_bottom_edge = HEADER_PAGE_HEIGHT - trim_y_margin
-        offset = 0.125 * 72 
+        trim_x = (HEADER_PAGE_WIDTH - HEADER_TRIM_WIDTH) / 2; trim_y = (HEADER_PAGE_HEIGHT - HEADER_TRIM_HEIGHT) / 2
+        offset = 0.125 * 72; p1_rect, p2_rect = None, None
 
-        # --- 1. Determine Artwork Preview Area (Anchored to Bottom) ---
         try:
             src_doc = fitz.open(pdf_path)
             if src_doc.page_count > 0:
-                page1 = src_doc[0]
-                is_landscape_original = page1.rect.width > page1.rect.height
-
-                if is_landscape_original:
-                    available_width = HEADER_TRIM_WIDTH - (2 * offset)
-                    scale_prev = available_width / page1.rect.width if page1.rect.width > 0 else 0
+                page1 = src_doc[0]; is_landscape = page1.rect.width > page1.rect.height
+                if is_landscape:
+                    avail_w = HEADER_TRIM_WIDTH - (2 * offset)
+                    scale = avail_w / page1.rect.width if page1.rect.width > 0 else 0
+                    if src_doc.page_count > 1: scale = min(scale, avail_w / src_doc[1].rect.width if src_doc[1].rect.width > 0 else 0)
+                    p1_w, p1_h = page1.rect.width * scale, page1.rect.height * scale
+                    p1_x = trim_x + (HEADER_TRIM_WIDTH - p1_w) / 2
+                    bot_y = HEADER_PAGE_HEIGHT - trim_y - offset + 36
                     if src_doc.page_count > 1:
-                        page2 = src_doc[1]
-                        scale2 = available_width / page2.rect.width if page2.rect.width > 0 else 0
-                        scale_prev = min(scale_prev, scale2)
-
-                    p1_w, p1_h = page1.rect.width * scale_prev, page1.rect.height * scale_prev
-                    p1_x0 = trim_left_edge + (HEADER_TRIM_WIDTH - p1_w) / 2
-                    current_y_bottom = trim_bottom_edge - offset + 36 
-                    
-                    if src_doc.page_count > 1:
-                        page2 = src_doc[1]
-                        p2_w, p2_h = page2.rect.width * scale_prev, page2.rect.height * scale_prev
-                        p2_x0 = trim_left_edge + (HEADER_TRIM_WIDTH - p2_w) / 2
-                        p2_y1 = current_y_bottom
-                        p2_y0 = p2_y1 - p2_h
-                        p2_rect = fitz.Rect(p2_x0, p2_y0, p2_x0 + p2_w, p2_y1)
-                        current_y_bottom = p2_y0 - offset
-
-                    p1_y1 = current_y_bottom
-                    p1_y0 = p1_y1 - p1_h
-                    p1_rect = fitz.Rect(p1_x0, p1_y0, p1_x0 + p1_w, p1_y1)
+                        p2_w, p2_h = src_doc[1].rect.width * scale, src_doc[1].rect.height * scale
+                        bot_y = bot_y - p2_h - offset
+                        p2_rect = fitz.Rect(trim_x + (HEADER_TRIM_WIDTH - p2_w)/2, bot_y, trim_x + (HEADER_TRIM_WIDTH - p2_w)/2 + p2_w, bot_y + p2_h)
+                        bot_y -= offset
+                    p1_rect = fitz.Rect(p1_x, bot_y - p1_h, p1_x + p1_w, bot_y)
                 else:
-                    scale_prev = 0.62
-                    p1_w, p1_h = page1.rect.width * scale_prev, page1.rect.height * scale_prev
-                    p1_y1 = trim_bottom_edge - offset + 40; p1_y0 = p1_y1 - p1_h
-                    p1_x0 = trim_left_edge + offset
-                    p1_rect = fitz.Rect(p1_x0, p1_y0, p1_x0 + p1_w, p1_y1)
-                    
+                    scale = 0.62; p1_w, p1_h = page1.rect.width * scale, page1.rect.height * scale
+                    p1_rect = fitz.Rect(trim_x + offset, HEADER_PAGE_HEIGHT - trim_y - offset + 40 - p1_h, trim_x + offset + p1_w, HEADER_PAGE_HEIGHT - trim_y - offset + 40)
                     if src_doc.page_count > 1:
-                        page2 = src_doc[1]; p2_w, p2_h = page2.rect.width * scale_prev, page2.rect.height * scale_prev
-                        p2_x1 = trim_right_edge - offset; p2_x0 = p2_x1 - p2_w
-                        p2_y0 = trim_top_edge + 1.5 * 72 + 36
-                        p2_rect = fitz.Rect(p2_x0, p2_y0, p2_x0 + p2_w, p2_y0 + p2_h)
-        except Exception as e:
-            print(f"  - Could not open/process preview doc: {e}")
+                        p2_w, p2_h = src_doc[1].rect.width * scale, src_doc[1].rect.height * scale
+                        p2_rect = fitz.Rect(HEADER_PAGE_WIDTH - trim_x - offset - p2_w, trim_y + 1.5*72 + 36, HEADER_PAGE_WIDTH - trim_x - offset, trim_y + 1.5*72 + 36 + p2_h)
+        except Exception: pass
 
-        # --- 2. Fixed Sequential Layout (Top to Bottom) ---
-        font_reg, font_bold = "helvetica", "helvetica-bold"
-        current_y = trim_top_edge + offset
-
-        # Block A: Filename / Total Qty
-        filename_text = os.path.splitext(os.path.basename(pdf_path))[0]
-        text_len = fitz.get_text_length(filename_text, fontname=font_bold, fontsize=FN_FONT_SIZE)
-        header_page.insert_text(fitz.Point((HEADER_PAGE_WIDTH - text_len) / 2, current_y + FN_FONT_SIZE), filename_text, fontname=font_bold, fontsize=FN_FONT_SIZE)
+        font_reg, font_bold = "helvetica", "helvetica-bold"; current_y = trim_y + offset
+        
+        # Block A: Filename / Qty
+        fn_text = os.path.splitext(os.path.basename(pdf_path))[0]
+        header_page.insert_text(fitz.Point((HEADER_PAGE_WIDTH - fitz.get_text_length(fn_text, fontname=font_bold, fontsize=FN_FONT_SIZE))/2, current_y + FN_FONT_SIZE), fn_text, fontname=font_bold, fontsize=FN_FONT_SIZE)
         current_y += FN_FONT_SIZE + LINE_SPACING
-
         qty_text = f"Total Qty: {total_quantity}" if total_quantity is not None else "Total Qty: N/A"
-        text_len = fitz.get_text_length(qty_text, fontname=font_reg, fontsize=QTY_FONT_SIZE)
-        header_page.insert_text(fitz.Point((HEADER_PAGE_WIDTH - text_len) / 2, current_y + QTY_FONT_SIZE), qty_text, fontname=font_reg, fontsize=QTY_FONT_SIZE)
+        header_page.insert_text(fitz.Point((HEADER_PAGE_WIDTH - fitz.get_text_length(qty_text, fontname=font_reg, fontsize=QTY_FONT_SIZE))/2, current_y + QTY_FONT_SIZE), qty_text, fontname=font_reg, fontsize=QTY_FONT_SIZE)
         current_y += QTY_FONT_SIZE + BLOCK_SPACING
 
-        # Block B: Store/Order Info
-        store_text = f"Store: {store_number}" if store_number else ""
-        text_len = fitz.get_text_length(store_text, fontname=font_bold, fontsize=STORE_FONT_SIZE)
-        header_page.insert_text(fitz.Point((HEADER_PAGE_WIDTH - text_len) / 2, current_y + STORE_FONT_SIZE), store_text, fontname=font_bold, fontsize=STORE_FONT_SIZE)
+        # Block B: Store/Order
+        if store_number:
+            st_text = f"Store: {store_number}"
+            header_page.insert_text(fitz.Point((HEADER_PAGE_WIDTH - fitz.get_text_length(st_text, fontname=font_bold, fontsize=STORE_FONT_SIZE))/2, current_y + STORE_FONT_SIZE), st_text, fontname=font_bold, fontsize=STORE_FONT_SIZE)
         current_y += STORE_FONT_SIZE + LINE_SPACING
-
-        order_text = f"Order: {order_number}" if order_number else ""
-        text_len = fitz.get_text_length(order_text, fontname=font_reg, fontsize=ORDER_FONT_SIZE)
-        header_page.insert_text(fitz.Point((HEADER_PAGE_WIDTH - text_len) / 2, current_y + ORDER_FONT_SIZE), order_text, fontname=font_reg, fontsize=ORDER_FONT_SIZE)
+        if order_number:
+            ord_text = f"Order: {order_number}"
+            header_page.insert_text(fitz.Point((HEADER_PAGE_WIDTH - fitz.get_text_length(ord_text, fontname=font_reg, fontsize=ORDER_FONT_SIZE))/2, current_y + ORDER_FONT_SIZE), ord_text, fontname=font_reg, fontsize=ORDER_FONT_SIZE)
         current_y += ORDER_FONT_SIZE + BLOCK_SPACING
 
-# Block C: Barcode (Suppressed if no icon drawn)
-        stacks_per_box = 2
-        is_completion_stack = (segment % stacks_per_box == 0) or (segment == total_segments)
-        will_draw_box_icon = False
-        if total_segments and is_completion_stack:
+        # Block C: Barcode
+        will_draw_box = False
+        if total_segments and ((segment % 2 == 0) or (segment == total_segments)):
             if (total_quantity == 250 and half_box_icon_path and os.path.exists(half_box_icon_path)) or \
-               (total_quantity in [500, 1000] and full_box_icon_path and os.path.exists(full_box_icon_path)):
-                will_draw_box_icon = True
+               (total_quantity in [500, 1000] and full_box_icon_path and os.path.exists(full_box_icon_path)): will_draw_box = True
 
-        if will_draw_box_icon and box_value:
-            barcode_canvas_w = 1.75 * 72 # 126pt
-            barcode_x0 = (HEADER_PAGE_WIDTH - barcode_canvas_w) / 2
-            
-            # White Background Box for Barcode Scannability
-            white_box_w = 136
-            white_box_h = 20
-            white_box_x0 = (HEADER_PAGE_WIDTH - white_box_w) / 2
-            # Center vertically to the barcode height (BARCODE_HEIGHT is 18)
-            white_box_y0 = current_y - ((white_box_h - BARCODE_HEIGHT) / 2)
-            
-            white_rect = fitz.Rect(white_box_x0, white_box_y0, white_box_x0 + white_box_w, white_box_y0 + white_box_h)
-            header_page.draw_rect(white_rect, color=(1, 1, 1), fill=(1, 1, 1)) # Pure White
-            
-            # 1. Draw Barcode PDF (Now on top of the white box)
-            rect = fitz.Rect(barcode_x0, current_y, barcode_x0 + barcode_canvas_w, current_y + BARCODE_HEIGHT)
-            with fitz.open("pdf", _create_barcode_pdf_in_memory(box_value, barcode_canvas_w, BARCODE_HEIGHT)) as barcode_doc:
-                header_page.show_pdf_page(rect, barcode_doc, 0)
-            
-            # 2. Increment Y by the barcode height
-            current_y += BARCODE_HEIGHT + 2 # Small 2pt gap between bars and text
-            
-            # 3. Draw Human Readable text BELOW the bars
-            text_len = fitz.get_text_length(box_value, fontname='helvetica', fontsize=BARCODE_TEXT_SIZE)
-            header_page.insert_text(fitz.Point((HEADER_PAGE_WIDTH - text_len) / 2, current_y + BARCODE_TEXT_SIZE), 
-                                    box_value, fontname='helvetica', fontsize=BARCODE_TEXT_SIZE)
-            
-            # 4. Final increment to move to the next block
+        if will_draw_box and box_value:
+            bc_w = 1.75 * 72; bc_x = (HEADER_PAGE_WIDTH - bc_w) / 2
+            wb_w, wb_h = 136, 20
+            header_page.draw_rect(fitz.Rect((HEADER_PAGE_WIDTH-wb_w)/2, current_y - (wb_h-BARCODE_HEIGHT)/2, (HEADER_PAGE_WIDTH-wb_w)/2+wb_w, current_y - (wb_h-BARCODE_HEIGHT)/2+wb_h), color=(1,1,1), fill=(1,1,1))
+            with fitz.open("pdf", _create_barcode_pdf_in_memory(box_value, bc_w, BARCODE_HEIGHT)) as bd: header_page.show_pdf_page(fitz.Rect(bc_x, current_y, bc_x + bc_w, current_y + BARCODE_HEIGHT), bd, 0)
+            current_y += BARCODE_HEIGHT + 2
+            header_page.insert_text(fitz.Point((HEADER_PAGE_WIDTH - fitz.get_text_length(box_value, fontname='helvetica', fontsize=BARCODE_TEXT_SIZE))/2, current_y + BARCODE_TEXT_SIZE), box_value, fontname='helvetica', fontsize=BARCODE_TEXT_SIZE)
             current_y += BARCODE_TEXT_SIZE + BLOCK_SPACING
-        else:
-            # Maintain spacing even if hidden to keep headers consistent
-            current_y += BARCODE_HEIGHT + 2 + BARCODE_TEXT_SIZE + BLOCK_SPACING
+        else: current_y += BARCODE_HEIGHT + 2 + BARCODE_TEXT_SIZE + BLOCK_SPACING
 
-        # Block D: Icon/Stack Text
-        if will_draw_box_icon:
-            def place_icon_fixed(page, doc, x_pos, y_pos):
+        # Block D: Icon
+        if will_draw_box:
+            def place_icon(doc, x, y):
                  if not doc or doc.page_count == 0: return 0
-                 icon_page = doc[0]
-                 aspect_ratio = icon_page.rect.width / icon_page.rect.height if icon_page.rect.height > 0 else 1
-                 target_w = ICON_HEIGHT * aspect_ratio
-                 target_rect = fitz.Rect(x_pos, y_pos, x_pos + target_w, y_pos + ICON_HEIGHT)
-                 page.show_pdf_page(target_rect, doc, 0)
-                 return target_w
-
-            half_box_doc, full_box_doc = None, None
+                 p = doc[0]; ar = p.rect.width / p.rect.height if p.rect.height > 0 else 1
+                 tw = ICON_HEIGHT * ar; header_page.show_pdf_page(fitz.Rect(x, y, x + tw, y + ICON_HEIGHT), doc, 0); return tw
+            
             try:
                 if total_quantity == 250:
-                    half_box_doc = fitz.open(half_box_icon_path)
-                    w = place_icon_fixed(header_page, half_box_doc, 0, -999) # Get width
-                    place_icon_fixed(header_page, half_box_doc, (HEADER_PAGE_WIDTH - w)/2, current_y)
+                    with fitz.open(half_box_icon_path) as d: w = place_icon(d, 0, -999); place_icon(d, (HEADER_PAGE_WIDTH - w)/2, current_y)
                 elif total_quantity == 500:
-                    full_box_doc = fitz.open(full_box_icon_path)
-                    w = place_icon_fixed(header_page, full_box_doc, 0, -999)
-                    place_icon_fixed(header_page, full_box_doc, (HEADER_PAGE_WIDTH - w)/2, current_y)
+                    with fitz.open(full_box_icon_path) as d: w = place_icon(d, 0, -999); place_icon(d, (HEADER_PAGE_WIDTH - w)/2, current_y)
                 elif total_quantity == 1000:
-                    full_box_doc = fitz.open(full_box_icon_path)
-                    w = place_icon_fixed(header_page, full_box_doc, 0, -999)
-                    gap = 4
-                    start_x = (HEADER_PAGE_WIDTH - (w * 2 + gap)) / 2
-                    place_icon_fixed(header_page, full_box_doc, start_x, current_y)
-                    place_icon_fixed(header_page, full_box_doc, start_x + w + gap, current_y)
-            finally:
-                if half_box_doc: half_box_doc.close()
-                if full_box_doc: full_box_doc.close()
+                    with fitz.open(full_box_icon_path) as d: w = place_icon(d, 0, -999); start = (HEADER_PAGE_WIDTH - (w * 2 + 4)) / 2; place_icon(d, start, current_y); place_icon(d, start + w + 4, current_y)
+            except Exception: pass
         elif total_segments and total_segments > 1:
-            stack_text = f"Stack {segment} of {total_segments}"
-            text_len = fitz.get_text_length(stack_text, fontname=font_reg, fontsize=10)
-            header_page.insert_text(fitz.Point((HEADER_PAGE_WIDTH - text_len) / 2, current_y + 10), stack_text, fontname=font_reg, fontsize=10)
+            stk_text = f"Stack {segment} of {total_segments}"
+            header_page.insert_text(fitz.Point((HEADER_PAGE_WIDTH - fitz.get_text_length(stk_text, fontname=font_reg, fontsize=10))/2, current_y + 10), stk_text, fontname=font_reg, fontsize=10)
 
-        # --- 3. Finalize Previews ---
+        # Previews
         if src_doc and src_doc.page_count > 0:
-            def render_preview(page_index, rect):
-                pix = src_doc[page_index].get_pixmap(dpi=144)
-                header_page.insert_image(rect, stream=pix.tobytes("png"))
-                header_page.draw_rect(rect, color=(0,0,0), width=0.5)
-            if p1_rect: render_preview(0, p1_rect)
-            if p2_rect and src_doc.page_count > 1: render_preview(1, p2_rect)
+            if p1_rect: header_page.insert_image(p1_rect, stream=src_doc[0].get_pixmap(dpi=144).tobytes("png")); header_page.draw_rect(p1_rect, color=(0,0,0), width=0.5)
+            if p2_rect and src_doc.page_count > 1: header_page.insert_image(p2_rect, stream=src_doc[1].get_pixmap(dpi=144).tobytes("png")); header_page.draw_rect(p2_rect, color=(0,0,0), width=0.5)
 
-        # Finalize and return
-        packet = BytesIO()
-        header_doc.save(packet, garbage=4, deflate=True)
-        packet.seek(0)
-        final_header_page = PdfReader(packet).pages[0]
-        trimbox_coords = [trim_x_margin, trim_y_margin, HEADER_PAGE_WIDTH - trim_x_margin, HEADER_PAGE_HEIGHT - trim_y_margin]
-        final_header_page.trimbox = RectangleObject(trimbox_coords)
-        return final_header_page
+        packet = BytesIO(); header_doc.save(packet, garbage=4, deflate=True); packet.seek(0)
+        final = PdfReader(packet).pages[0]
+        final.trimbox = RectangleObject([trim_x, trim_y, HEADER_PAGE_WIDTH - trim_x, HEADER_PAGE_HEIGHT - trim_y])
+        return final
     finally:
         if header_doc: header_doc.close()
         if src_doc: src_doc.close()
 
-# --- PRESERVED FUNCTIONS BELOW ---
-
-def add_segmented_headers_to_pdf(orientation_check_path, target_pdf_path, order_number=None, total_quantity=None, background_color=None, store_number=None, half_box_icon_path=None, full_box_icon_path=None, box_values=None):
-    if box_values is None: box_values = {}
-    box_keys = sorted(box_values.keys())
-    barcode_values = [box_values.get(k) for k in box_keys] 
-
+def add_segmented_headers_to_pdf(orientation_path, target_path, order=None, qty=None, bg=None, store=None, half_icon=None, full_icon=None, box_vals={}):
     try:
-        reader = PdfReader(target_pdf_path)
-        total_pages = len(reader.pages)
-        if total_pages == 0: return False
-
-        num_segments = (total_pages + 499) // 500
-        writer = PdfWriter()
+        reader = PdfReader(target_path); total = len(reader.pages)
+        if total == 0: return False
         
-        x_margin = (HEADER_PAGE_WIDTH - HEADER_TRIM_WIDTH) / 2
-        y_margin = (HEADER_PAGE_HEIGHT - HEADER_TRIM_HEIGHT) / 2
-        centered_trimbox = RectangleObject([x_margin, y_margin, HEADER_PAGE_WIDTH - x_margin, HEADER_PAGE_HEIGHT - y_margin])
-        blank_header_page = PageObject.create_blank_page(width=HEADER_PAGE_WIDTH, height=HEADER_PAGE_HEIGHT)
-        blank_header_page.trimbox = centered_trimbox
+        sorted_vals = [box_vals.get(k) for k in sorted(box_vals.keys())]
+        num_segments = (total + 499) // 500; writer = PdfWriter()
+        
+        xm = (HEADER_PAGE_WIDTH - HEADER_TRIM_WIDTH)/2; ym = (HEADER_PAGE_HEIGHT - HEADER_TRIM_HEIGHT)/2
+        blank = PageObject.create_blank_page(width=HEADER_PAGE_WIDTH, height=HEADER_PAGE_HEIGHT)
+        blank.trimbox = RectangleObject([xm, ym, HEADER_PAGE_WIDTH - xm, HEADER_PAGE_HEIGHT - ym])
 
-        barcode_index = 0
+        bc_idx = 0
         for i in range(num_segments):
-            segment_num = i + 1
-            will_draw_box_icon = False
-            stacks_per_box = 2
-            is_completion_stack = (segment_num % stacks_per_box == 0) or (segment_num == num_segments)
-
-            if num_segments and is_completion_stack:
-                if total_quantity == 250 and half_box_icon_path and os.path.exists(half_box_icon_path):
-                    will_draw_box_icon = True
-                elif total_quantity in [500, 1000] and full_box_icon_path and os.path.exists(full_box_icon_path):
-                    will_draw_box_icon = True
+            seg_num = i + 1
+            will_draw = False
+            if total > 0 and ((seg_num % 2 == 0) or (seg_num == num_segments)):
+                if (qty == 250 and half_icon and os.path.exists(half_icon)) or (qty in [500, 1000] and full_icon and os.path.exists(full_icon)): will_draw = True
             
-            box_barcode_value = None
-            if will_draw_box_icon:
-                if barcode_index < len(barcode_values):
-                    val = barcode_values[barcode_index]
-                    if val and str(val).lower() != 'nan':
-                        box_barcode_value = val
-                    barcode_index += 1 
+            val = None
+            if will_draw and bc_idx < len(sorted_vals):
+                raw = sorted_vals[bc_idx]
+                if raw and str(raw).lower() != 'nan': val = raw
+                bc_idx += 1
             
-            text_header = create_header_page(
-                orientation_check_path, order_number, segment_num, num_segments, total_quantity, 
-                background_color, store_number, half_box_icon_path, full_box_icon_path, box_barcode_value
-            )
-            writer.add_page(text_header)
-            writer.add_page(blank_header_page)
-            start_index, end_index = i * 500, (i + 1) * 500
-            for page in reader.pages[start_index:end_index]: writer.add_page(page)
+            writer.add_page(create_header_page(orientation_path, order, seg_num, num_segments, qty, bg, store, half_icon, full_icon, val))
+            writer.add_page(blank)
+            for p in reader.pages[i*500:(i+1)*500]: writer.add_page(p)
 
-        with open(target_pdf_path, "wb") as out_file: writer.write(out_file)
+        with open(target_path, "wb") as f: writer.write(f)
         return True
-    except Exception as e:
-        print(f"  - FAILED to add segmented headers: {e}"); traceback.print_exc(); return False
+    except Exception as e: utils_ui.print_error(f"Header Add Failed: {e}"); return False
 
-def sanitize_filename(filename):
-    filename = str(filename).replace('/', '-')
-    return re.sub(r'[\\:*?"<>|]', '', filename).strip()
-
-def natural_keys(text):
-    return [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', str(text))]
+def sanitize_filename(filename): return re.sub(r'[\\:*?"<>|]', '', str(filename).replace('/', '-')).strip()
+def natural_keys(text): return [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', str(text))]
 
 def standardize_pdf_for_gang_run(pdf_path):
     try:
         reader_check = PdfReader(pdf_path)
         if not reader_check.pages or reader_check.pages[0].mediabox.width <= reader_check.pages[0].mediabox.height:
             return False
+
         writer = PdfWriter()
         reader = PdfReader(pdf_path)
         for i, original_page in enumerate(reader.pages):
@@ -333,94 +196,92 @@ def standardize_pdf_for_gang_run(pdf_path):
             width = float(original_page.mediabox.width)
             height = float(original_page.mediabox.height)
             new_page = PageObject.create_blank_page(width=height, height=width)
+            
             if page_number % 2 != 0:
                 transform = Transformation().rotate(-90).translate(tx=0, ty=width)
                 recalculate_box = lambda box: RectangleObject((box.lower_left[1], width - box.upper_right[0], box.upper_right[1], width - box.lower_left[0]))
             else:
                 transform = Transformation().rotate(90).translate(tx=height, ty=0)
                 recalculate_box = lambda box: RectangleObject((height - box.upper_right[1], box.lower_left[0], height - box.lower_left[1], box.upper_right[0]))
-            boxes = ["mediabox", "cropbox", "bleedbox", "trimbox", "artbox"]
-            for box in boxes:
-                if hasattr(original_page, box): setattr(new_page, box, recalculate_box(getattr(original_page, box)))
+            
+            boxes_to_transform = {
+                "mediabox": original_page.mediabox, 
+                "cropbox": getattr(original_page, "cropbox", original_page.mediabox),
+                "bleedbox": getattr(original_page, "bleedbox", original_page.mediabox), 
+                "trimbox": getattr(original_page, "trimbox", original_page.mediabox),
+                "artbox": getattr(original_page, "artbox", original_page.mediabox)
+            }
+            
+            for box_name, box_obj in boxes_to_transform.items():
+                if box_obj: # Ensure not None
+                     setattr(new_page, box_name, recalculate_box(box_obj))
+            
             new_page.merge_transformed_page(original_page, transform)
             writer.add_page(new_page)
-        with open(pdf_path, "wb") as out_file: writer.write(out_file)
+            
+        with open(pdf_path, "wb") as f: writer.write(f)
         return True
-    except Exception as e:
-        print(f"  - Standardization failed: {e}"); traceback.print_exc(); return False
+    except Exception as e: utils_ui.print_error(f"Standardization Failed: {e}"); return False
 
-def process_dataframe(df, files_path, originals_path, sheet_name, color_palette_path=None, icon_paths=None):
-    is_gang_run = GANG_RUN_TRIGGER in sheet_name.upper()
-    if not is_gang_run:
-        print(f"\nProcessing sheet '{sheet_name}' as STANDARD. No modifications needed."); return
-
-    start_time = time.time()
-    color_map = None
-    loaded_palette = []
-    try:
-        if color_palette_path and os.path.exists(color_palette_path):
-            palette_df = pd.read_csv(color_palette_path, encoding='utf-8-sig')
-            if all(col in palette_df.columns for col in ['C', 'M', 'Y', 'K']):
-                loaded_palette = [tuple(row) for row in palette_df[['C', 'M', 'Y', 'K']].to_numpy()]
-    except Exception as e: print(f"  - WARNING: Palette error: {e}")
-
-    if loaded_palette:
-        sort_data = []
-        for idx, row in df.iterrows():
-            qty = int(pd.to_numeric(row.get("quantity_ordered"), errors='coerce') or 0)
-            ticket = str(row.get("job_ticket_number", ""))
-            sort_data.append({'original_index': idx, 'qty': qty, 'ticket': ticket})
-        sort_data.sort(key=lambda x: (-x['qty'], natural_keys(x['ticket'])))
-        color_map = {item['original_index']: loaded_palette[rank] for rank, item in enumerate(sort_data) if rank < len(loaded_palette)}
-
-    process_rows(df, files_path, originals_path, is_gang_run, start_time, color_map, icon_paths)
-
-def process_rows(rows, files_path, originals_path, is_gang_run, sheet_start_time, color_map, icon_paths):
-    BOX_COLS = [f'box_{chr(65+i)}' for i in range(8)]
-    for idx, row in rows.iterrows():
+def process_dataframe(df, files_path, originals_path, sheet_name, palette_path=None, icon_paths=None):
+    if GANG_RUN_TRIGGER not in sheet_name.upper(): utils_ui.print_info(f"Skipping Standard Sheet: {sheet_name}"); return
+    
+    utils_ui.print_section(f"Processing Gang Run: {sheet_name}")
+    color_map = {}
+    if palette_path and os.path.exists(palette_path):
         try:
-            file_base = sanitize_filename(str(row.get("job_ticket_number")))
-            production_path = os.path.join(files_path, f"{file_base}.pdf")
-            if not os.path.exists(production_path): continue
+            pdf = pd.read_csv(palette_path, encoding='utf-8-sig')
+            pal = [tuple(r) for r in pdf[['C', 'M', 'Y', 'K']].to_numpy()] if {'C','M','Y','K'}.issubset(pdf.columns) else []
+            if pal:
+                data = [{'idx': i, 'qty': int(pd.to_numeric(r.get("quantity_ordered"), errors='coerce') or 0), 't': str(r.get("job_ticket_number",""))} for i, r in df.iterrows()]
+                data.sort(key=lambda x: (-x['qty'], natural_keys(x['t'])))
+                color_map = {d['idx']: pal[i] for i, d in enumerate(data) if i < len(pal)}
+        except Exception as e: utils_ui.print_warning(f"Palette Error: {e}")
 
-            if is_gang_run:
-                box_values = {col: str(row.get(col)).strip() for col in BOX_COLS if pd.notna(row.get(col)) and str(row.get(col)).strip().lower() != 'nan'}
+    rows_data = list(df.iterrows())
+    utils_ui.print_info(f"Preparing {len(rows_data)} files...")
+    with utils_ui.create_progress() as progress:
+        task = progress.add_task("Preparing Files...", total=len(rows_data))
+        for idx, row in rows_data:
+            try:
+                base = sanitize_filename(str(row.get("job_ticket_number")))
+                prod_path = os.path.join(files_path, f"{base}.pdf")
+                if not os.path.exists(prod_path): progress.update(task, advance=1); continue
+
+                box_vals = {f'box_{chr(65+i)}': str(row.get(f'box_{chr(65+i)}')).strip() for i in range(8) if pd.notna(row.get(f'box_{chr(65+i)}'))}
                 os.makedirs(originals_path, exist_ok=True)
-                archived_path = os.path.join(originals_path, f"{file_base}.pdf")
-                shutil.copy2(production_path, archived_path)
+                arch_path = os.path.join(originals_path, f"{base}.pdf")
+                shutil.copy2(prod_path, arch_path)
                 
-                reader = PdfReader(archived_path)
+                reader = PdfReader(arch_path)
                 if len(reader.pages) in [1, 2]:
                     qty = int(pd.to_numeric(row.get("quantity_ordered"), errors='coerce') or 1)
                     writer = PdfWriter()
-                    if len(reader.pages) == 1:
-                        art = reader.pages[0]
-                        blank = PageObject.create_blank_page(width=art.mediabox.width, height=art.mediabox.height)
-                        for box in ["mediabox", "cropbox", "bleedbox", "trimbox", "artbox"]:
-                            if hasattr(art, box): setattr(blank, box, getattr(art, box))
-                        for _ in range(qty): writer.add_page(art); writer.add_page(blank)
-                    else:
-                        for _ in range(qty): writer.add_page(reader.pages[0]); writer.add_page(reader.pages[1])
-                    with open(production_path, "wb") as f_out: writer.write(f_out)
+                    pages = [reader.pages[0]] if len(reader.pages)==1 else [reader.pages[0], reader.pages[1]]
+                    if len(pages)==1: pages.append(PageObject.create_blank_page(width=pages[0].mediabox.width, height=pages[0].mediabox.height))
+                    for _ in range(qty): 
+                        for p in pages: writer.add_page(p)
+                    with open(prod_path, "wb") as f: writer.write(f)
                 
-                standardize_pdf_for_gang_run(production_path)
-                store = str(row.get("cost_center", "")).split('-')[0].strip() if pd.notna(row.get("cost_center")) else ""
-                add_segmented_headers_to_pdf(archived_path, production_path, str(row.get("order_number", "")), int(pd.to_numeric(row.get('quantity_ordered'), errors='coerce') or 0), color_map.get(idx), store, icon_paths.get('HALF_BOX_ICON_PATH'), icon_paths.get('FULL_BOX_ICON_PATH'), box_values)
-
-            sys.stdout.write(f"Pre-pressing file {file_base}\n"); sys.stdout.flush()
-        except Exception as e: print(f"Error row {idx}: {e}")
+                standardize_pdf_for_gang_run(prod_path)
+                store = str(row.get("cost_center", "")).split('-')[0].strip()
+                add_segmented_headers_to_pdf(arch_path, prod_path, str(row.get("order_number", "")), int(pd.to_numeric(row.get('quantity_ordered'), errors='coerce') or 0), color_map.get(idx), store, icon_paths.get('HALF_BOX_ICON_PATH'), icon_paths.get('FULL_BOX_ICON_PATH'), box_vals)
+            except Exception as e: utils_ui.print_error(f"Row {idx} Failed: {e}")
+            progress.update(task, advance=1)
 
 def main(input_excel_path, files_base_folder, originals_base_folder, central_config_json):
-    central_config = json.loads(central_config_json)
-    color_palette_path = central_config.get('COLOR_PALETTE_PATH')
-    icon_paths = {'HALF_BOX_ICON_PATH': central_config.get('HALF_BOX_ICON_PATH'), 'FULL_BOX_ICON_PATH': central_config.get('FULL_BOX_ICON_PATH')}
-
-    xls = pd.ExcelFile(input_excel_path)
-    for sheet_name in xls.sheet_names:
-        if GANG_RUN_TRIGGER not in sheet_name.upper(): continue
-        dtype_map = {f'box_{chr(65+i)}': str for i in range(8)}
-        df = pd.read_excel(xls, sheet_name=sheet_name, dtype=dtype_map)
-        process_dataframe(df, os.path.join(files_base_folder, sanitize_filename(sheet_name)), os.path.join(originals_base_folder, sanitize_filename(sheet_name)), sheet_name, color_palette_path, icon_paths)
+    utils_ui.setup_logging(None)
+    utils_ui.print_banner("60 - Prepare Press Files")
+    try:
+        config = json.loads(central_config_json)
+        icons = {'HALF_BOX_ICON_PATH': config.get('HALF_BOX_ICON_PATH'), 'FULL_BOX_ICON_PATH': config.get('FULL_BOX_ICON_PATH')}
+        
+        xls = pd.ExcelFile(input_excel_path)
+        for sheet_name in xls.sheet_names:
+            if GANG_RUN_TRIGGER in sheet_name.upper():
+                df = pd.read_excel(xls, sheet_name=sheet_name, dtype={f'box_{chr(65+i)}': str for i in range(8)})
+                process_dataframe(df, os.path.join(files_base_folder, sanitize_filename(sheet_name)), os.path.join(originals_base_folder, sanitize_filename(sheet_name)), sheet_name, config.get('COLOR_PALETTE_PATH'), icons)
+    except Exception as e: utils_ui.print_error(f"Fatal Error: {e}"); sys.exit(1)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

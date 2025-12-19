@@ -9,32 +9,31 @@ import traceback
 import tempfile
 import concurrent.futures
 import math
-from datetime import datetime, timedelta
-from io import BytesIO
-from collections import defaultdict
 import sys
-from itertools import groupby
 import argparse
 import json 
+from itertools import groupby
+from datetime import datetime, timedelta
+from io import BytesIO
+
+import utils_ui # <--- New UI Utility
 
 # PDF Libraries
-import fitz  # PyMuPDF
-from pypdf import PdfReader, PdfWriter, PageObject, Transformation
-from pypdf.generic import DictionaryObject, NameObject
-from reportlab.lib.pagesizes import letter, landscape
-from reportlab.lib.units import inch
-from reportlab.lib.utils import ImageReader
-from PIL import Image
+try:
+    import fitz  # PyMuPDF
+    from pypdf import PdfReader, PdfWriter, PageObject, Transformation
+    from pypdf.generic import DictionaryObject, NameObject
+    from reportlab.lib.pagesizes import letter, landscape
+    from reportlab.lib.units import inch
+    from reportlab.lib.utils import ImageReader
+    from PIL import Image
+    from reportlab.graphics.barcode import code128
+    from reportlab.pdfgen import canvas as rl_canvas
+except ImportError:
+    utils_ui.print_error("Required PDF libraries not found. Please install: pymupdf, pypdf, reportlab, pillow")
+    sys.exit(1)
 
-# ReportLab Barcode Library (for in-memory generation)
-from reportlab.graphics.barcode import code128
-from reportlab.pdfgen import canvas as rl_canvas
-
-# --- Define the string that identifies a gang run sheet ---
 GANG_RUN_TRIGGER = "-GR-"
-
-# NOTE: All hard-coded config paths (WATERMARK_PATH, etc.) have been removed.
-# They will be passed in via the 'central_config' dictionary in main().
 
 def sanitize_filename(filename):
     filename = str(filename).replace('/', '-')
@@ -58,20 +57,17 @@ def download_pdf(url, filepath):
             for chunk in response.iter_content(chunk_size=8192): f.write(chunk)
         return True
     except Exception as e:
-        print(f"Download failed for {url}: {str(e)}"); return False
+        # utils_ui.print_error(f"Download failed for {url}: {e}") # Suppress noisy logs inside worker
+        return False
 
 def create_proof_in_memory(input_path, filename_text, order_number, sku="", qty=""):
     doc = None
     proof_doc = None
     try:
-        if not os.path.exists(input_path):
-            print(f"  - Artwork file for proof not found: {input_path}")
-            return None
+        if not os.path.exists(input_path): return None
         doc = fitz.open(input_path)
         page_count = doc.page_count
-        if page_count == 0:
-            print(f"  - Artwork file for proof is empty: {input_path}")
-            return None
+        if page_count == 0: return None
         proof_doc = fitz.open()
         PAGE_W, PAGE_H = fitz.paper_size("letter-l")
         proof_page = proof_doc.new_page(width=PAGE_W, height=PAGE_H)
@@ -139,11 +135,6 @@ def create_proof_in_memory(input_path, filename_text, order_number, sku="", qty=
         art_page = doc[0]
         final_scale = scale
         if page_count > 25:
-            GAP = 36
-            max_w_per_page = (avail_rect.width - GAP) / 2
-            scale1 = min(max_w_per_page / doc[0].rect.width, avail_rect.height / doc[0].rect.height) if doc[0].rect.width > 0 else 0
-            scale2 = min(max_w_per_page / doc[1].rect.width, avail_rect.height / doc[1].rect.height) if doc[1].rect.width > 0 else 0
-            final_scale = min(scale1, scale2, 1.0)
             page_text = f"Displaying Pages 1-2 of {page_count}"
         elif 1 < page_count <= 25:
             page_text = f"Displaying Pages 1-{page_count} of {page_count}"
@@ -161,15 +152,12 @@ def create_proof_in_memory(input_path, filename_text, order_number, sku="", qty=
         proof_page.insert_text(fitz.Point((PAGE_W - line2_len)/2, footer_y2), line2, fontname=font_reg, fontsize=10)
         return proof_doc
     except Exception as e:
-        print(f"Proof creation failed for {input_path}: {str(e)}")
-        traceback.print_exc()
+        utils_ui.print_error(f"Proof creation failed for {input_path}: {e}")
         return None
     finally:
         if doc and not doc.is_closed: doc.close()
 
-def extract_numerics(value):
-    if pd.isna(value): return ""
-    return re.sub(r'[^0-9]', '', str(value))
+def extract_numerics(value): return re.sub(r'[^0-9]', '', str(value)) if pd.notna(value) else ""
 
 def extract_cost_center_number(cost_center):
     if pd.isna(cost_center): return "0000"
@@ -185,8 +173,7 @@ def format_zip_code(zip_code):
     val = str(zip_code).strip()
     if val.endswith('.0'): val = val[:-2]
     parts = val.split('-')
-    if len(parts[0]) > 0 and len(parts[0]) < 5:
-        parts[0] = parts[0].zfill(5)
+    if len(parts[0]) > 0 and len(parts[0]) < 5: parts[0] = parts[0].zfill(5)
     return '-'.join(parts)
 
 def _create_barcode_pdf_in_memory(data_string, width, height):
@@ -196,8 +183,7 @@ def _create_barcode_pdf_in_memory(data_string, width, height):
     barcode_actual_width = barcode.width 
     x_centered = (width - barcode_actual_width) / 2
     barcode.drawOn(c, x_centered, 0)
-    c.save()
-    buffer.seek(0)
+    c.save(); buffer.seek(0)
     return buffer
 
 def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, total_counts_map=None, sheet_name=None, watermark_path=None):
@@ -205,101 +191,78 @@ def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, to
     doc = fitz.open()
     PAGE_W, PAGE_H = fitz.paper_size("letter-l")
     LEFT_INDENT, RIGHT_INDENT = 0.25*72, 0.25*72
-    FIELD_NAME_RIGHT_EDGE = LEFT_INDENT + 1.875*72
     FIELD_VALUE_X = LEFT_INDENT + 2.0*72
     MAX_LINE_WIDTH = PAGE_W - RIGHT_INDENT - FIELD_VALUE_X
-    title_style, gang_run_style, sec_style = ("helvetica-bold", 14), ("helvetica-bold", 12), ("helvetica-bold", 14)
+    title_style, sec_style = ("helvetica-bold", 14), ("helvetica-bold", 14)
     fname_style, fval_style, line_style = ("helvetica-bold", 11), ("helvetica", 11), ("helvetica", 11)
-    
-    # Style for the sheet name
     sheet_name_style = ("helvetica", 10)
     
-    # Use the passed base_job_number for the main ticket identifier
     ticket_number = str(base_job_number)
-    
     due_date = ""
     try:
-        # Use the 'ship_date' column directly from the incoming data
         date_str = main_row.get("ship_date", "")
         if pd.notna(date_str) and str(date_str).strip():
-            # Parse the date and format it to MM/DD/YYYY
             due_date = pd.to_datetime(date_str).strftime('%m/%d/%Y')
-    except Exception as e:
-        print(f"Ship date processing error: {e}")
+    except Exception: pass
         
     order_number_raw = clean_text(main_row.get("order_number", ""))
-    order_number = extract_numerics(order_number_raw) # For barcode
+    order_number = extract_numerics(order_number_raw)
     cost_center = extract_cost_center_number(main_row.get("cost_center", ""))
 
     def draw_header(page, is_first_page=True):
         y_top_line = 0.5 * 72
-        
-        # Draw JOB NUMBER (Left)
         page.insert_text(fitz.Point(LEFT_INDENT, y_top_line), f"JOB NUMBER: {ticket_number}", fontname=title_style[0], fontsize=title_style[1])
-        
-        # Draw ORDER NUMBER (Center)
         if order_number_raw:
             order_text = f"ORDER: {order_number_raw}"
             order_text_len = fitz.get_text_length(order_text, fontname=title_style[0], fontsize=title_style[1])
             page.insert_text(fitz.Point((PAGE_W - order_text_len) / 2, y_top_line), order_text, fontname=title_style[0], fontsize=title_style[1])
 
-        # Draw SHIP DATE (Right)
         ship_text = f"SHIP DATE: {due_date}" if due_date else "SHIP DATE: TBD"
         ship_text_len = fitz.get_text_length(ship_text, fontname=title_style[0], fontsize=title_style[1])
         page.insert_text(fitz.Point(PAGE_W - RIGHT_INDENT - ship_text_len, y_top_line), ship_text, fontname=title_style[0], fontsize=title_style[1])
         
-        # Replaced gang_run_name with sheet_name
         if sheet_name:
             page.insert_text(fitz.Point(LEFT_INDENT, 0.75*72), str(sheet_name), fontname=sheet_name_style[0], fontsize=sheet_name_style[1])
         
         if is_first_page:
-            # Barcode section now starts from the right-aligned ship date
             center_x = PAGE_W - RIGHT_INDENT - (ship_text_len / 2)
-            y = y_top_line + 20 # Start barcodes below the top line
+            y = y_top_line + 20 
             barcode_w, barcode_h = 2.0*72, 0.375*72
             
-            if order_number: # Use the numeric-only order_number for the barcode
+            if order_number: 
                 try:
                     barcode_x0 = center_x - (barcode_w / 2)
                     rect = fitz.Rect(barcode_x0, y, barcode_x0 + barcode_w, y + barcode_h)
-                    with fitz.open("pdf", _create_barcode_pdf_in_memory(order_number, barcode_w, barcode_h)) as barcode_doc:
-                        page.show_pdf_page(rect, barcode_doc, 0)
+                    with fitz.open("pdf", _create_barcode_pdf_in_memory(order_number, barcode_w, barcode_h)) as barcode_doc: page.show_pdf_page(rect, barcode_doc, 0)
                     text_y = rect.y1 + 4
-                    # Use the raw, full order number for the text label
-                    text = f"Order Number: {order_number_raw}" 
-                    text_len = fitz.get_text_length(text, fontname='helvetica', fontsize=11)
+                    text = f"Order Number: {order_number_raw}"; text_len = fitz.get_text_length(text, fontname='helvetica', fontsize=11)
                     page.insert_text(fitz.Point(center_x - (text_len / 2), text_y + 10), text, fontname='helvetica', fontsize=11)
                     y = text_y + 12 + 24
-                except Exception as e:
-                    print(f"Error generating order barcode: {e}")
+                except Exception: pass
             if cost_center:
                 try:
                     barcode_x0 = center_x - (barcode_w / 2)
                     rect = fitz.Rect(barcode_x0, y, barcode_x0 + barcode_w, y + barcode_h)
-                    with fitz.open("pdf", _create_barcode_pdf_in_memory(cost_center, barcode_w, barcode_h)) as barcode_doc:
-                        page.show_pdf_page(rect, barcode_doc, 0)
+                    with fitz.open("pdf", _create_barcode_pdf_in_memory(cost_center, barcode_w, barcode_h)) as barcode_doc: page.show_pdf_page(rect, barcode_doc, 0)
                     text_y = rect.y1 + 4
-                    text = f"Store Number: {cost_center}"
-                    text_len = fitz.get_text_length(text, fontname='helvetica', fontsize=11)
+                    text = f"Store Number: {cost_center}"; text_len = fitz.get_text_length(text, fontname='helvetica', fontsize=11)
                     page.insert_text(fitz.Point(center_x - (text_len / 2), text_y + 10), text, fontname='helvetica', fontsize=11)
                     y = text_y + 12 + 10
-                except Exception as e:
-                    print(f"Error generating cost center barcode: {e}")
+                except Exception: pass
             
-            # Use watermark_path argument
             if watermark_path and os.path.exists(watermark_path):
                 try:
                     watermark_w, watermark_h = 1.0*72, 1.0*72
                     watermark_x0 = center_x - (watermark_w / 2)
                     rect = fitz.Rect(watermark_x0, y, watermark_x0 + watermark_w, y + watermark_h)
                     page.insert_image(rect, filename=watermark_path)
-                except Exception as e:
-                    print(f"Watermark error: {e}")
+                except Exception: pass
 
-                    
     def draw_right_aligned(page, text, y, font, size):
+        FIELD_NAME_RIGHT_EDGE = LEFT_INDENT + 1.875*72
         text_len = fitz.get_text_length(text, fontname=font, fontsize=size)
         page.insert_text(fitz.Point(FIELD_NAME_RIGHT_EDGE - text_len, y), text, fontname=font, fontsize=size)
+
     page = doc.new_page(width=PAGE_W, height=PAGE_H)
     draw_header(page, is_first_page=True)
     y = 1.25*72
@@ -310,6 +273,7 @@ def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, to
             draw_header(page, is_first_page=False)
             return 1.5*72
         return y_pos
+
     page.insert_text(fitz.Point(LEFT_INDENT, y), "PRODUCT INFORMATION", fontname=sec_style[0], fontsize=sec_style[1]); y += 0.25*72
     for field, display_name in [("product_id", "Product ID"), ("product_name", "Product Name")]:
         y = new_page_check(y)
@@ -317,10 +281,7 @@ def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, to
         page.insert_text(fitz.Point(FIELD_VALUE_X, y), clean_text(main_row.get(field, "")), fontname=fval_style[0], fontsize=fval_style[1]); y += 0.25*72
     y += 0.25*72; y = new_page_check(y)
     
-    # Renamed section to "SHIPPING DETAILS"
     page.insert_text(fitz.Point(LEFT_INDENT, y), "SHIPPING DETAILS", fontname=sec_style[0], fontsize=sec_style[1]); y += 0.25*72
-    
-    # Removed "order_number" from this loop
     for field, display_name in [("cost_center", "Cost Center")]:
         y = new_page_check(y)
         draw_right_aligned(page, f"{display_name}:", y, fname_style[0], fname_style[1])
@@ -344,156 +305,85 @@ def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, to
         y = addr_y + 0.05 * 72
     y += 0.25*72; y = new_page_check(y)
     
-    # Use 'job_total_line_items' from the spreadsheet data
-    try:
-        # Try to get the pre-supplied global total from the new data column
-        total_items = int(main_row.get("job_total_line_items"))
-    except (ValueError, TypeError, AttributeError):
-        # Fallback if column is missing, blank, or not a number
-        total_items = total_counts_map.get(str(ticket_number), len(ticket_rows))
-        print(f"  - WARNING: 'job_total_line_items' not found or invalid for {ticket_number}. Using sheet total ({total_items}).")
-    # --- END MODIFICATION ---
+    try: total_items = int(main_row.get("job_total_line_items"))
+    except (ValueError, TypeError, AttributeError): total_items = total_counts_map.get(str(ticket_number), len(ticket_rows))
     
-    # Get indices from the pre-parsed 'line_item_suffix'
     indices = []
     for r in ticket_rows:
-        try:
-            indices.append(int(r.get('line_item_suffix', '0')))
-        except (ValueError, TypeError):
-            indices.append(0) # Default if suffix is not a valid number
+        try: indices.append(int(r.get('line_item_suffix', '0')))
+        except (ValueError, TypeError): indices.append(0)
     
     header_text = f"LINE ITEMS ({total_items} Total)" if len(ticket_rows) == total_items else f"LINE ITEMS {min(indices)}-{max(indices)} ({total_items} Total)"
     page.insert_text(fitz.Point(LEFT_INDENT, y), header_text, fontname=sec_style[0], fontsize=sec_style[1]); y += 0.25*72
     page.draw_line(fitz.Point(LEFT_INDENT, y), fitz.Point(PAGE_W - RIGHT_INDENT, y)); y += 0.1875*72
 
-    # --- Line Items Section ---
-    
-    # Define line height for wrapping
-    line_item_height = 0.2 * 72  # 14.4pt
-    
-    # Define horizontal positions for columns
+    line_item_height = 0.2 * 72 
     x_item_col = LEFT_INDENT
     x_qty_col = LEFT_INDENT + 1.0 * 72
-    
-    # This is now the RIGHT-hand edge for labels
     x_label_right_edge = x_qty_col + 1.9 * 72
-    
-    # Calculate value start position based on the LONGEST label ("SKU Desc:") to ensure alignment
-    label_width_allowance = fitz.get_text_length("SKU Desc:", fontname=fname_style[0], fontsize=fname_style[1]) + 10
-    
-    # Value column X position is based on the label's right edge
-    x_value_col = x_label_right_edge + 10 # 10-point gap after the right-aligned edge
-    
-    # Barcode layout constants
-    barcode_w = 1.75 * 72
-    barcode_h = 0.25 * 72
-    barcode_gap = 10
-    
-    # Calculate the max width for the wrapping values
-    # Subtract barcode width and gap from the available space
+    x_value_col = x_label_right_edge + 10 
+    barcode_w, barcode_h, barcode_gap = 1.75 * 72, 0.25 * 72, 10
     max_value_width = (PAGE_W - RIGHT_INDENT - barcode_w - barcode_gap) - x_value_col
 
     for row in ticket_rows:
-        y = new_page_check(y, min_y_from_bottom=1.5*72) # Need more space for wrapped items
-        current_y = y # This will track the Y-pos *within* an item
-        line_y = current_y # This will track the lowest point text is drawn
+        y = new_page_check(y, min_y_from_bottom=1.5*72)
+        current_y = y; line_y = current_y
 
-        # --- Get all data for the row ---
         item_part = f"Item {row.get('line_item_suffix', '??')}:"
         qty_part = f"Qty: {str(row.get('quantity_ordered', ''))}"
         sku_label, sku_value = "SKU:", str(row.get("sku", ""))
         sku_desc_label, sku_desc_value = "SKU Desc:", clean_text(row.get("sku_description", ""))
         order_item_id = str(row.get("order_item_id", "")).strip()
 
-        # --- Draw static parts (Item and Qty) ---
         page.insert_text(fitz.Point(x_item_col, current_y), item_part, fontname=line_style[0], fontsize=line_style[1])
         page.insert_text(fitz.Point(x_qty_col, current_y), qty_part, fontname=fname_style[0], fontsize=fname_style[1])
 
-        # Draw Barcode (Right Aligned)
-        barcode_bottom_y = current_y # Track where the barcode ends
+        barcode_bottom_y = current_y 
         if order_item_id:
             try:
-                # Position: Right aligned
                 barcode_x0 = PAGE_W - RIGHT_INDENT - barcode_w
-                
-                # Draw Barcode
-                y_offset = -2  # Move up by 2 points
+                y_offset = -2
                 rect = fitz.Rect(barcode_x0, current_y + y_offset, barcode_x0 + barcode_w, current_y + barcode_h + y_offset)
                 with fitz.open("pdf", _create_barcode_pdf_in_memory(order_item_id, barcode_w, barcode_h)) as barcode_doc:
                     page.show_pdf_page(rect, barcode_doc, 0)
-                # Draw Text below barcode
-                text_y = rect.y1 + 2 # slightly below barcode
+                text_y = rect.y1 + 2
                 text_len = fitz.get_text_length(order_item_id, fontname='helvetica', fontsize=9)
-                # Center text under barcode
                 text_x = barcode_x0 + (barcode_w - text_len) / 2
                 page.insert_text(fitz.Point(text_x, text_y + 8), order_item_id, fontname='helvetica', fontsize=9)
-                
-                barcode_bottom_y = text_y + 10 # Update bottom tracking
-            except Exception as e:
-                print(f"Error generating line item barcode for {order_item_id}: {e}")
+                barcode_bottom_y = text_y + 10 
+            except Exception: pass
 
-        # Draw SKU Desc (with wrapping)
         if sku_desc_value:
-            # Draw the right-aligned label
             label_w = fitz.get_text_length(sku_desc_label, fontname=fname_style[0], fontsize=fname_style[1])
             page.insert_text(fitz.Point(x_label_right_edge - label_w, current_y), sku_desc_label, fontname=fname_style[0], fontsize=fname_style[1])
-
-            words, current_line = sku_desc_value.split(), []
-            line_y = current_y # Start at the same line as the label
+            words, current_line = sku_desc_value.split(), []; line_y = current_y
             for word in words:
                 if fitz.get_text_length(' '.join(current_line + [word]), fontname=fval_style[0], fontsize=fval_style[1]) > max_value_width:
-                    if current_line:
-                        line_y = new_page_check(line_y); page.insert_text(fitz.Point(x_value_col, line_y), ' '.join(current_line), fontname=fval_style[0], fontsize=fval_style[1]); line_y += line_item_height
+                    if current_line: line_y = new_page_check(line_y); page.insert_text(fitz.Point(x_value_col, line_y), ' '.join(current_line), fontname=fval_style[0], fontsize=fval_style[1]); line_y += line_item_height
                     current_line = [word]
-                else:
-                    current_line.append(word)
-            if current_line:
-                line_y = new_page_check(line_y); page.insert_text(fitz.Point(x_value_col, line_y), ' '.join(current_line), fontname=fval_style[0], fontsize=fval_style[1])
-            
-            current_y = line_y + line_item_height # Update current_y to the next available line
+                else: current_line.append(word)
+            if current_line: line_y = new_page_check(line_y); page.insert_text(fitz.Point(x_value_col, line_y), ' '.join(current_line), fontname=fval_style[0], fontsize=fval_style[1])
+            current_y = line_y + line_item_height 
 
-        # Draw SKU (with wrapping)
         if sku_value:
-            # Draw the right-aligned label
             label_w = fitz.get_text_length(sku_label, fontname=fname_style[0], fontsize=fname_style[1])
             page.insert_text(fitz.Point(x_label_right_edge - label_w, current_y), sku_label, fontname=fname_style[0], fontsize=fname_style[1])
-
-            words, current_line = sku_value.split(), []
-            line_y = current_y # Start at the new current_y
+            words, current_line = sku_value.split(), []; line_y = current_y 
             for word in words:
                 if fitz.get_text_length(' '.join(current_line + [word]), fontname=fval_style[0], fontsize=fval_style[1]) > max_value_width:
-                    if current_line:
-                        line_y = new_page_check(line_y); page.insert_text(fitz.Point(x_value_col, line_y), ' '.join(current_line), fontname=fval_style[0], fontsize=fval_style[1]); line_y += line_item_height
+                    if current_line: line_y = new_page_check(line_y); page.insert_text(fitz.Point(x_value_col, line_y), ' '.join(current_line), fontname=fval_style[0], fontsize=fval_style[1]); line_y += line_item_height
                     current_line = [word]
-                else:
-                    current_line.append(word)
-            if current_line:
-                line_y = new_page_check(line_y); page.insert_text(fitz.Point(x_value_col, line_y), ' '.join(current_line), fontname=fval_style[0], fontsize=fval_style[1])
-            
+                else: current_line.append(word)
+            if current_line: line_y = new_page_check(line_y); page.insert_text(fitz.Point(x_value_col, line_y), ' '.join(current_line), fontname=fval_style[0], fontsize=fval_style[1])
             current_y = line_y + line_item_height
         
-        # --- Draw separator line ---
-        # Use the *lowest* y position (either text or barcode)
         final_y = max(line_y, barcode_bottom_y)
-        
         y = final_y + 0.125*72 
-        page.draw_line(fitz.Point(LEFT_INDENT, y), fitz.Point(PAGE_W - RIGHT_INDENT, y)); 
-        y += 0.1875*72
-    
-
+        page.draw_line(fitz.Point(LEFT_INDENT, y), fitz.Point(PAGE_W - RIGHT_INDENT, y)); y += 0.1875*72
     
     y += 0.25*72; y = new_page_check(y)
     page.insert_text(fitz.Point(LEFT_INDENT, y), "PRODUCTION INSTRUCTIONS", fontname=sec_style[0], fontsize=sec_style[1]); y += 0.3*72
-    
-    # Removed 'sku_description'
-    instruction_fields = {
-        "general_description": "General Desc.",
-        "paper_description": "Paper Desc.",
-        "press_instructions": "Press Inst.",
-        "bindery_instructions": "Bindery Inst.",
-        "job_ticket_shipping_instructions": "Shipping Inst."
-    }
-
+    instruction_fields = {"general_description": "General Desc.", "paper_description": "Paper Desc.", "press_instructions": "Press Inst.", "bindery_instructions": "Bindery Inst.", "job_ticket_shipping_instructions": "Shipping Inst."}
     for field, display_name in instruction_fields.items():
         value = clean_text(main_row.get(field, ""))
         if not value: continue
@@ -502,282 +392,162 @@ def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, to
         words, current_line, line_y = value.split(), [], y
         for word in words:
             if fitz.get_text_length(' '.join(current_line + [word]), fontname=fval_style[0], fontsize=fval_style[1]) > MAX_LINE_WIDTH:
-                if current_line:
-                    line_y = new_page_check(line_y); page.insert_text(fitz.Point(FIELD_VALUE_X, line_y), ' '.join(current_line), fontname=fval_style[0], fontsize=fval_style[1]); line_y += 0.2 * 72
+                if current_line: line_y = new_page_check(line_y); page.insert_text(fitz.Point(FIELD_VALUE_X, line_y), ' '.join(current_line), fontname=fval_style[0], fontsize=fval_style[1]); line_y += 0.2 * 72
                 current_line = [word]
-            else:
-                current_line.append(word)
-        if current_line:
-            line_y = new_page_check(line_y); page.insert_text(fitz.Point(FIELD_VALUE_X, line_y), ' '.join(current_line), fontname=fval_style[0], fontsize=fval_style[1])
+            else: current_line.append(word)
+        if current_line: line_y = new_page_check(line_y); page.insert_text(fitz.Point(FIELD_VALUE_X, line_y), ' '.join(current_line), fontname=fval_style[0], fontsize=fval_style[1])
         y = line_y + (0.2 * 72) + 0.05 * 72
     return doc
 
 def download_worker(task):
     idx, url, path = task
     try: return (idx, path) if download_pdf(url, path) else (idx, None)
-    except Exception as e: print(f"Exception in download worker for URL {url}: {e}"); return idx, None
+    except Exception as e: return idx, None
 
 def process_dataframe(df, files_path, tickets_path, sheet_name, watermark_path=None):
-    """
-    This function now determines if a sheet is a gang run based on its name.
-    It receives pre-defined paths for all output types.
-    It pre-processes job numbers to extract a base and suffix for grouping.
-    """
     is_gang_run = GANG_RUN_TRIGGER in sheet_name.upper()
+    job_type = "GANG RUN" if is_gang_run else "STANDARD"
+    utils_ui.print_section(f"Sheet: {sheet_name} ({job_type})")
 
-    if is_gang_run:
-        print(f"\nProcessing sheet '{sheet_name}' as a GANG RUN.")
-    else:
-        print(f"\nProcessing sheet '{sheet_name}' as STANDARD jobs.")
-
-    # Pre-processing logic for job_ticket_numbers
     ticket_col_name = "job_ticket_number"
-    
     def parse_job_number(job_str):
         job_str = str(job_str).strip()
         if '-' in job_str:
-            parts = job_str.rsplit('-', 1)
-            base, suffix = parts[0], parts[1]
-            # Check if suffix is numeric, log if not
-            if not suffix.isdigit():
-                print(f"  - WARNING: Non-numeric suffix found for job '{job_str}'. Treating as part of the base name.")
-                return job_str, '1' # Treat whole string as base, default suffix to 1
+            parts = job_str.rsplit('-', 1); base, suffix = parts[0], parts[1]
+            if not suffix.isdigit(): return job_str, '1'
             return base, suffix
-        else:
-            # No suffix found, treat the whole string as the base
-            return job_str, '1'
+        else: return job_str, '1'
 
-    # Replaced the fragile .apply(lambda...) with a more robust method
-    # Apply the parsing function, which returns a Series of tuples
     parsed_data = df[ticket_col_name].apply(parse_job_number)
+    df[['base_job_number', 'line_item_suffix']] = pd.DataFrame(parsed_data.tolist(), index=parsed_data.index, columns=['base_job_number', 'line_item_suffix'])
     
-    # Convert the Series of tuples into a new DataFrame, ensuring the index is preserved.
-    # This is a more robust way to assign the two new columns and avoids the ValueError.
-    df[['base_job_number', 'line_item_suffix']] = pd.DataFrame(
-        parsed_data.tolist(), 
-        index=parsed_data.index,
-        columns=['base_job_number', 'line_item_suffix'] # Explicitly name columns
-    )
-    # --- End Pre-processing ---
-
-    # Calculate total item counts per job ON THIS SHEET using the new base number
     global_counts = df.groupby('base_job_number').size().to_dict()
     total_counts_map = {str(k): v for k, v in global_counts.items()}
     start_time = time.time()
     
-    # Process the entire dataframe as a single group
-    process_rows(
-        rows=df,
-        files_path=files_path,
-        tickets_path=tickets_path,
-        sheet_start_time=start_time,
-        total_counts_map=total_counts_map,
-        watermark_path=watermark_path,
-        sheet_name=sheet_name
-    )
-    
-    elapsed = time.time() - start_time
-    print(f"\nProcessing complete for sheet '{sheet_name}' - Total time: {int(elapsed//3600):02d}:{int((elapsed%3600)//60):02d}:{int(elapsed%60):02d}")
+    process_rows(df, files_path, tickets_path, sheet_start_time=start_time, total_counts_map=total_counts_map, watermark_path=watermark_path, sheet_name=sheet_name)
+    utils_ui.print_info(f"Completed sheet '{sheet_name}'.")
 
 def process_rows(rows, files_path, tickets_path, sheet_start_time=0, total_counts_map=None, watermark_path=None, sheet_name=None):
-    """
-    This function ONLY handles downloading and TICKETwPROOFS creation.
-    All press-prep logic (archiving, duplication, rotating, headers) has been REMOVED.
-    """
     rows_with_index = list(rows.reset_index().to_dict('records'))
     download_tasks = []
     
     for row in rows_with_index:
-        # Generate filename directly from the job_ticket_number column
         file_base = sanitize_filename(str(row.get("job_ticket_number")))
         row['file_base'] = file_base
-        
         url = row.get("1-up_output_file_url", "")
         dest_path = os.path.join(files_path, f"{row['file_base']}.pdf")
 
         if url and isinstance(url, str):
-            # Case 1: Web URL (HTTP/HTTPS)
-            if url.startswith('http'):
+            if url.startswith('http'): 
                 row['download_status'] = 'pending'
                 download_tasks.append((row['index'], url, dest_path))
-            
-            # Case 2: Local File (Absolute path or relative to script execution)
             elif os.path.exists(url):
-                try:
-                    # Copy local file to the destination folder to mimic a download
-                    shutil.copy2(url, dest_path) 
-                    row['downloaded_production_path'] = dest_path
-                    row['download_status'] = 'success'
-                except Exception as e:
-                    print(f"  - Error copying local file {url}: {e}")
-                    row['download_status'] = 'failed'
-            
-            # Case 3: File not found locally
-            else:
-                print(f"  - WARNING: File path not found: {url}")
-                row['download_status'] = 'no_url'
-        else:
-            row['download_status'] = 'no_url'        
+                try: 
+                    shutil.copy2(url, dest_path); row['downloaded_production_path'] = dest_path; row['download_status'] = 'success'
+                except Exception: row['download_status'] = 'failed'
+            else: row['download_status'] = 'no_url'
+        else: row['download_status'] = 'no_url'        
+
     if download_tasks:
-        print(f"Starting concurrent download of {len(download_tasks)} files...")
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            results = list(executor.map(download_worker, download_tasks))
-        results_map = {idx: path for idx, path in results}
+        utils_ui.print_info(f"Starting download of {len(download_tasks)} files...")
+        with utils_ui.create_progress() as progress:
+            task = progress.add_task("Downloading Artwork...", total=len(download_tasks))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+                futures = [executor.submit(download_worker, t) for t in download_tasks]
+                results_map = {}
+                for future in concurrent.futures.as_completed(futures):
+                    idx, path = future.result()
+                    results_map[idx] = path
+                    progress.update(task, advance=1)
+        
         for row in rows_with_index:
             if row['download_status'] == 'pending':
                 path = results_map.get(row['index'])
                 row['downloaded_production_path'], row['download_status'] = (path, 'success') if path else (None, 'failed')
 
-    # Sort rows by the full job_ticket_number to ensure correct line item order
     rows_with_index.sort(key=lambda r: str(r.get("job_ticket_number", "")))
-
-    # Group by the pre-processed 'base_job_number'
+    
+    grouped_jobs = []
     for base_job_num, group in groupby(rows_with_index, key=lambda r: r.get('base_job_number', "")):
-        ticket_rows = list(group)
-        
-        if "blank" in str(base_job_num).lower():
-            print(f"  - Skipping ticket generation for job '{base_job_num}' (Identified as Blank).")
-            continue
-        
-        final_doc = None
-        try:
-            base_name = sanitize_filename(str(base_job_num))
-            combined_path = os.path.join(tickets_path, f"{base_name}_TICKETwPROOFS.pdf")
+        grouped_jobs.append((base_job_num, list(group)))
+
+    if grouped_jobs:
+        utils_ui.print_info(f"Generating tickets for {len(grouped_jobs)} jobs...")
+        with utils_ui.create_progress() as progress:
+            ticket_task = progress.add_task("Generating Tickets...", total=len(grouped_jobs))
             
-            # Pass the base number, sheet name, and watermark_path to the ticket generator
-            final_doc = generate_ticket_pymupdf(
-                ticket_rows, 
-                base_job_num, 
-                gang_run_name=None, # Gang run name is not needed for ticket
-                total_counts_map=total_counts_map, 
-                sheet_name=sheet_name,
-                watermark_path=watermark_path # <-- Pass config path
-            )
+            for base_job_num, ticket_rows in grouped_jobs:
+                if "blank" in str(base_job_num).lower(): 
+                    progress.update(ticket_task, advance=1); continue
+                
+                final_doc = None
+                try:
+                    base_name = sanitize_filename(str(base_job_num))
+                    combined_path = os.path.join(tickets_path, f"{base_name}_TICKETwPROOFS.pdf")
+                    final_doc = generate_ticket_pymupdf(ticket_rows, base_job_num, gang_run_name=None, total_counts_map=total_counts_map, sheet_name=sheet_name, watermark_path=watermark_path)
 
-            for row in ticket_rows:
-                if row['download_status'] == 'success':
-                    production_artwork_path = row['downloaded_production_path']
-                    
-                    # --- Press Prep logic removed ---
-                    # No archiving, no duplication, no standardization, no headers.
-                    
-                    # The proof is ALWAYS generated from the downloaded production file path.
-                    proof_source_path = production_artwork_path
-                    
-                    sku_val, qty_val = clean_text(row.get('sku')), clean_text(row.get('quantity_ordered'))
-                    proof_doc = create_proof_in_memory(
-                        proof_source_path, production_artwork_path, str(row.get("order_number")), sku=sku_val, qty=qty_val)
-                    if proof_doc:
-                        final_doc.insert_pdf(proof_doc)
-                        proof_doc.close()
-                else:
-                    print(f"  - Job Number: {row['file_base']} has no valid artwork URL. Skipping proof.")
+                    for row in ticket_rows:
+                        if row['download_status'] == 'success':
+                            production_artwork_path = row['downloaded_production_path']
+                            proof_source_path = production_artwork_path
+                            sku_val, qty_val = clean_text(row.get('sku')), clean_text(row.get('quantity_ordered'))
+                            proof_doc = create_proof_in_memory(proof_source_path, production_artwork_path, str(row.get("order_number")), sku=sku_val, qty=qty_val)
+                            if proof_doc: final_doc.insert_pdf(proof_doc); proof_doc.close()
+                
+                    if final_doc and final_doc.page_count > 0:
+                        pdf_buffer = BytesIO(); final_doc.save(pdf_buffer, garbage=4, deflate=True); pdf_buffer.seek(0)
+                        reader = PdfReader(pdf_buffer); writer = PdfWriter(); writer.append_pages_from_reader(reader)
+                        writer.root_object[NameObject("/ViewerPreferences")] = DictionaryObject({NameObject("/Duplex"): NameObject("/Simplex"), NameObject("/Staple"): NameObject("/TopRight")})
+                        with open(combined_path, "wb") as f_out: writer.write(f_out)
+                except Exception as e: utils_ui.print_error(f"Error processing ticket {base_job_num}: {e}")
+                finally:
+                    if final_doc and not final_doc.is_closed: final_doc.close()
+                
+                progress.update(ticket_task, advance=1)
 
-            if final_doc and final_doc.page_count > 0:
-                pdf_buffer = BytesIO()
-                final_doc.save(pdf_buffer, garbage=4, deflate=True)
-                pdf_buffer.seek(0)
-                reader = PdfReader(pdf_buffer)
-                writer = PdfWriter()
-                writer.append_pages_from_reader(reader)
-                viewer_prefs = DictionaryObject({NameObject("/Duplex"): NameObject("/Simplex"), NameObject("/Staple"): NameObject("/TopRight")})
-                writer.root_object[NameObject("/ViewerPreferences")] = viewer_prefs
-                with open(combined_path, "wb") as f_out: writer.write(f_out)
-
-            elapsed = time.time() - sheet_start_time
-            sys.stdout.write(f"Processing job {base_name} - elapsed: {int(elapsed//3600):02d}:{int((elapsed%3600)//60):02d}:{int(elapsed%60):02d}\n"); sys.stdout.flush()
-        except Exception as e:
-            print(f"\nError processing ticket {base_job_num}: {e}"); traceback.print_exc()
-        finally:
-            if final_doc and not final_doc.is_closed: final_doc.close()
-
-# --- Main function ---
 def main(input_excel_path, files_base_path, tickets_base_path, central_config_json):
-    """
-    Main processing function for 50a.
-    Main processing function.
-    Accepts central_config as JSON string.
-    Accepts separate paths for FILES and TICKETS.
-    """
+    utils_ui.setup_logging(None)
+    utils_ui.print_banner("40 - Job Collateral Generation")
     start_time = time.time()
-    filename = os.path.basename(input_excel_path)
-    print(f"Processing File: {filename}")
 
-    # --- Load config from JSON string ---
-    try:
-        central_config = json.loads(central_config_json)
-        print("✓ Successfully loaded configuration from controller.")
-    except json.JSONDecodeError as e:
-        print(f"FATAL ERROR: Could not parse central_config JSON: {e}")
-        sys.exit(1) # Exit with error code
-    # ---
+    try: central_config = json.loads(central_config_json)
+    except Exception: utils_ui.print_error("Invalid Config JSON"); sys.exit(1)
 
-    # Get config paths from the loaded central_config dictionary
-    # Use .get() for safety in case key is missing
     watermark_path = central_config.get('WATERMARK_PATH')
-    if watermark_path:
-        print(f"Using watermark path: {watermark_path}")
-    else:
-        print("No watermark path provided in config.")
+    if watermark_path: utils_ui.print_info(f"Watermark: {os.path.basename(watermark_path)}")
 
     try:
-        # Paths are now passed in directly
-        # No longer creating .../FILES or .../TICKETwPROOFS
         os.makedirs(files_base_path, exist_ok=True)
         os.makedirs(tickets_base_path, exist_ok=True)
 
         xls = pd.ExcelFile(input_excel_path)
         for sheet_name in xls.sheet_names:
-            print(f"\nProcessing sheet: {sheet_name}")
             df = pd.read_excel(xls, sheet_name=sheet_name)
             if 'order_item_id' in df.columns:
-                df['order_item_id'] = df['order_item_id'].astype(str).str.strip()
-                # Remove trailing .0 that comes from float conversion
-                df['order_item_id'] = df['order_item_id'].apply(lambda x: x[:-2] if x.endswith('.0') else x)
-            print(f"    - Discovered {len(df)} rows.")
-
-            # --- Fix: Check for empty dataframe *before* trying to parse columns ---
-            if df.empty:
-                print(f"    - Sheet '{sheet_name}' is empty. Skipping.")
-                continue # Skip to the next sheet
-            # --- End Fix ---
+                df['order_item_id'] = df['order_item_id'].astype(str).str.strip().apply(lambda x: x[:-2] if x.endswith('.0') else x)
+            
+            if df.empty: utils_ui.print_warning(f"Sheet '{sheet_name}' is empty. Skipping."); continue
 
             sanitized_sheet_name = sanitize_filename(sheet_name)
-            
-            # Sheet paths are now inside the passed-in base paths
             sheet_files_path = os.path.join(files_base_path, sanitized_sheet_name)
             sheet_tickets_path = os.path.join(tickets_base_path, sanitized_sheet_name)
-
             os.makedirs(sheet_files_path, exist_ok=True)
             os.makedirs(sheet_tickets_path, exist_ok=True)
 
-            process_dataframe(
-                df,
-                sheet_files_path,
-                sheet_tickets_path,
-                sheet_name,
-                watermark_path=watermark_path # Pass loaded path
-            )
+            process_dataframe(df, sheet_files_path, sheet_tickets_path, sheet_name, watermark_path=watermark_path)
 
     except Exception as e:
-        print(f"Error processing spreadsheet {filename}: {e}"); traceback.print_exc()
-        sys.exit(1) # Exit with error code
-    elapsed = time.time() - start_time
-    print(f"\nTotal processing time for file: {int(elapsed//3600):02d}:{int((elapsed%3600)//60):02d}:{int(elapsed%60):02d}")
+        utils_ui.print_error(f"Processing Failed: {e}"); traceback.print_exc(); sys.exit(1)
+    
+    utils_ui.print_success(f"Total Processing Time: {time.time() - start_time:.2f}s")
 
-# --- __main__ block ---
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="50 - Download Artwork and Generate Job Collateral (TICKETwPROOFS).")
-    parser.add_argument("input_excel_path", help="Path to the input Excel file.")
-    # Replaced output_base_folder with two specific paths
-    parser.add_argument("files_base_folder", help="Path to the base output folder where FILES subfolders will be created.")
-    parser.add_argument("tickets_base_folder", help="Path to the base output folder where TICKET subfolders will be created.")
-    # ---
-    parser.add_argument("central_config_json", help="Central configuration dictionary (subset with WATERMARK_PATH) passed as a JSON string.")
-
+    parser = argparse.ArgumentParser(description="40 - Generate Job Collateral")
+    parser.add_argument("input_excel_path", help="Input Excel")
+    parser.add_argument("files_base_folder", help="Files Output Base")
+    parser.add_argument("tickets_base_folder", help="Tickets Output Base")
+    parser.add_argument("central_config_json", help="Config JSON")
     args = parser.parse_args()
 
-    # --- Pass new arguments to main ---
-    print("--- Starting 40: Generate Job Collateral ---")
     main(args.input_excel_path, args.files_base_folder, args.tickets_base_folder, args.central_config_json)
-    print("--- Finished 40 ---")

@@ -1,4 +1,4 @@
-# 00_Controller.py (MODIFIED)
+# 00_Controller.py
 import os
 import sys
 import subprocess
@@ -10,7 +10,7 @@ import logging
 import traceback
 import json
 
-# --- Configuration Loading (Unchanged) ---
+# --- Configuration Loading ---
 def load_config(config_path="config.yaml"):
     # ... (no changes needed) ...
     if not os.path.exists(config_path):
@@ -23,7 +23,7 @@ def load_config(config_path="config.yaml"):
     except yaml.YAMLError as e: print(f"FATAL ERROR: Could not parse YAML file: {e}"); sys.exit(1)
     except Exception as e: print(f"FATAL ERROR: An unexpected error occurred while loading the config: {e}"); sys.exit(1)
 
-# --- Logging Setup (Unchanged) ---
+# --- Logging Setup ---
 def setup_controller_logging(log_dir):
     # ... (no changes needed) ...
     os.makedirs(log_dir, exist_ok=True)
@@ -36,12 +36,10 @@ def setup_controller_logging(log_dir):
                         datefmt='%Y-%m-%d %H:%M%S', handlers=[logging.FileHandler(log_file), logging.StreamHandler(sys.stdout)], force=True)
     logging.info(f"Controller logging initialized. Log file: {log_file}")
 
-# --- Execution Engine (Unchanged) ---
+# --- Execution Engine ---
 def run_script(script_path, args=None):
     """
-    MODIFIED: This function now streams stdout in real-time.
-    It uses subprocess.Popen instead of subprocess.run to read
-    the output line by line as it is generated.
+    Executes a script and streams stdout in real-time.
     """
     if not os.path.exists(script_path): 
         raise FileNotFoundError(f"Script not found: {script_path}")
@@ -86,7 +84,7 @@ def run_script(script_path, args=None):
         logging.error(traceback.format_exc()); 
         raise
 
-# --- Main Workflow (MODIFIED) ---
+# --- Main Workflow ---
 def main_workflow():
     """Orchestrates the entire multi-stage workflow."""
 
@@ -102,7 +100,7 @@ def main_workflow():
     if not all([script_paths, stage1_paths]):
         print("FATAL ERROR: Required path sections missing in config.yaml."); sys.exit(1)
 
-    # --- MODIFIED: Added check for new 'sort' script ---
+    # --- Check for sort script ---
     if 'sort' not in script_paths or 'bundle' not in script_paths:
         print("FATAL ERROR: 'paths.scripts.sort' or 'paths.scripts.bundle' missing in config.yaml."); sys.exit(1)
 
@@ -121,7 +119,7 @@ def main_workflow():
     original_source_files_staging_map = {} 
 
     try:
-        # --- Stage 1: Data Collection (Unchanged) ---
+        # --- Stage 1: Data Collection ---
         print("Starting Stage 1: Data Collection") 
         s1_input_dir = stage1_paths.get('input_dir')
         
@@ -144,13 +142,13 @@ def main_workflow():
         consolidated_reports.sort(key=os.path.getmtime, reverse=True)
         consolidated_report_path = consolidated_reports[0]; print(f"Found consolidated report in staging: {os.path.basename(consolidated_report_path)}")
 
-        # --- DYNAMIC PATH GENERATION (MODIFIED) ---
+        # --- Dynamic Path Generation ---
         print("--- Creating dynamic job folders ---")
         dynamic_base_name = os.path.splitext(os.path.basename(consolidated_report_path))[0]
         dynamic_job_folder = os.path.join(dynamic_build_root, dynamic_base_name)
         print(f"Dynamic job root set to: {dynamic_job_folder}")
 
-        # --- NEW: Load dynamic job structure from config ---
+        # --- Load dynamic job structure from config ---
         job_structure = config.get('paths', {}).get('dynamic_job_structure', {})
         if not job_structure:
             print("FATAL ERROR: Config missing 'paths.dynamic_job_structure'. Cannot proceed.")
@@ -165,7 +163,7 @@ def main_workflow():
         originals_dir = os.path.join(workup_dir, job_structure.get('originals', 'Originals_DEFAULT'))
         production_imposed_dir = os.path.join(dynamic_job_folder, job_structure.get('production_imposed', 'ProductionImposed_DEFAULT'))
         production_imposed_subfolders = job_structure.get('imposed_subfolders', [])
-        # --- END NEW BLOCK ---
+
 
         controller_log_dir = data_files_logs_dir # Controller log goes into the (now dynamic) data/logs dir
         
@@ -174,7 +172,7 @@ def main_workflow():
         logging.info(f"Dynamic job root set to: {dynamic_job_folder}")
         logging.info(f"Logging re-initialized in dynamic job folder: {controller_log_dir}")
 
-        # --- Create dynamic directories (MODIFIED) ---
+        # --- Create dynamic directories ---
         # Paths are now based on the variables built from the config
         new_dirs_to_create = {
             job_tickets_dir, data_files_logs_dir, production_imposed_dir,
@@ -187,9 +185,9 @@ def main_workflow():
             if d:
                  try: os.makedirs(d, exist_ok=True); logging.info(f"Ensured dynamic directory exists: {d}")
                  except Exception as e: logging.error(f"Could not create dynamic directory {d}: {e}"); sys.exit(1)
-        # --- END MODIFIED BLOCK ---
+
         
-        # --- Move consolidated report (Unchanged) ---
+        # --- Move consolidated report ---
         logging.info(f"Moving consolidated report from '{s1_staging_dir}' to '{data_files_logs_dir}'")
         try:
             final_consolidated_path = os.path.join(data_files_logs_dir, os.path.basename(consolidated_report_path))
@@ -204,7 +202,7 @@ def main_workflow():
             logging.error(f"FATAL: Could not move consolidated report to {data_files_logs_dir}: {move_err}")
             raise 
 
-        # --- RENAME BLOCK (Unchanged) ---
+        # --- Rename Block ---
         try:
             base, ext = os.path.splitext(consolidated_report_path)
             new_report_path = f"{base}_UNSORTED{ext}"
@@ -215,16 +213,16 @@ def main_workflow():
             logging.error(f"Could not rename consolidated report: {rename_err}. Archiving may fail.")
 
 
-        # --- MODIFIED: Stage 2 is now split ---
+        # --- Stage 2: Data Sorting and Bundling ---
         
-        # --- Stage 2a: Data Sorting (Unchanged) ---
+        # --- Stage 2a: Data Sorting ---
         logging.info("Starting Stage 2a: Data Sorting")
         config_file_path = "config.yaml"
         # Args: input_excel_path, output_dir, config_path
         s2a_args = [ consolidated_report_path_unsorted, data_files_logs_dir, config_file_path ]
         run_script(script_paths['sort'], s2a_args) # Calls 20a_DataSorter.py
 
-        # --- Handoff 2a -> 2b: Find the new _CATEGORIZED file (Unchanged) ---
+        # --- Handoff 2a -> 2b: Find the new _CATEGORIZED file ---
         logging.info("Searching for categorized checkpoint file...")
         categorized_reports = glob.glob(os.path.join(data_files_logs_dir, '*_CATEGORIZED.xlsx'))
         if not categorized_reports: 
@@ -233,16 +231,16 @@ def main_workflow():
         categorized_report_path = categorized_reports[0]
         logging.info(f"Found categorized file: {os.path.basename(categorized_report_path)}")
 
-        # --- Stage 2b: Data Bundling (Unchanged) ---
+        # --- Stage 2b: Data Bundling ---
         logging.info("Starting Stage 2b: Data Bundling")
         # Args: input_excel_path, output_dir, config_path
         s2b_args = [ categorized_report_path, data_files_logs_dir, config_file_path ]
         run_script(script_paths['bundle'], s2b_args) # Calls 20b_DataBundler.py
         
-        # --- End of MODIFIED block ---
 
 
-        # --- NEW: Move original source files (Unchanged) ---
+
+        # --- Move original source files ---
         logging.info(f"Moving {len(original_source_files_staging_map)} original source files from '{s1_staging_dir}' to '{data_files_logs_dir}'")
         for filename, staging_path in original_source_files_staging_map.items():
             final_path = os.path.join(data_files_logs_dir, filename) 
@@ -255,10 +253,10 @@ def main_workflow():
             else:
                 logging.warning(f"Original source file {filename} not found in staging dir '{s1_staging_dir}' for moving.")
         
-        # --- Handoff 2b -> 2c (was 2a -> 2b): Find FINAL Excel + Load Frag Map JSON (Unchanged) ---
+        # --- Handoff 2b -> 2c: Find FINAL Excel + Load Frag Map JSON ---
         logging.info("Searching for FINAL bundled report...")
         bundled_reports = glob.glob(os.path.join(data_files_logs_dir, 'MarcomOrderDate*.xlsx'))
-        # --- MODIFIED: Exclude both _UNSORTED and _CATEGORIZED ---
+        # --- Exclude both _UNSORTED and _CATEGORIZED ---
         bundled_reports = [
             f for f in bundled_reports 
             if "_UNSORTED" not in f and "_CATEGORIZED" not in f
@@ -280,18 +278,18 @@ def main_workflow():
              logging.warning(f"Fragmentation map JSON not found: {frag_map_json_path}. Proceeding with empty map.")
              fragmentation_map = {}
 
-        # --- Stage 2c: PDF Runlist Generation (was 2b) (Unchanged) ---
+        # --- Stage 2c: PDF Runlist Generation ---
         logging.info("Starting Stage 2c: PDF Runlist Generation")
         s2c_args = [bundled_report_path, dynamic_job_folder, json.dumps(config), json.dumps(fragmentation_map)]
         run_script(script_paths['pdfgen'], s2c_args)
 
-        # --- Stage 3a: Generate Job Collateral (Unchanged) ---
+        # --- Stage 3a: Generate Job Collateral ---
         # Note: This script now receives the full paths built from the config
         logging.info("Starting Stage 3a: Generate Job Collateral")
         s3a_config_subset = {
             'WATERMARK_PATH': paths.get('watermark_path'),
-            'CALIBRI_LIGHT_PATH': paths.get('calibri_light_font_path'), # <-- ADDED
-            'CALIBRI_BOLD_PATH': paths.get('calibri_bold_font_path')    # <-- ADDED
+            'CALIBRI_LIGHT_PATH': paths.get('calibri_light_font_path'),
+            'CALIBRI_BOLD_PATH': paths.get('calibri_bold_font_path')
         }
         
         s3a_args = [
@@ -302,11 +300,11 @@ def main_workflow():
         ]
         run_script(script_paths['collateral'], s3a_args)
         
-        # --- Stage 3b: Prepare Press Files (Unchanged) ---
+        # --- Stage 3b: Prepare Press Files ---
         # Note: This script now receives the full paths built from the config
         logging.info("Starting Stage 3b: Prepare Press Files")
-        s3_files_dir = oneup_files_dir    # <-- Use config-driven path
-        s3_originals_dir = originals_dir # <-- Use config-driven path
+        s3_files_dir = oneup_files_dir
+        s3_originals_dir = originals_dir
         
         s3b_config_subset = {}
         s3b_config_subset['shipping_box_rules'] = config.get('shipping_box_rules', {})
@@ -331,7 +329,7 @@ def main_workflow():
         s3b_args = [bundled_report_path, s3_files_dir, s3_originals_dir, json.dumps(s3b_config_subset)]
         run_script(script_paths['pressprep'], s3b_args)
 
-        # --- Handoff 3 -> 4: Find Gang Run Folders (Unchanged) ---
+        # --- Handoff 3 -> 4: Find Gang Run Folders ---
         # Note: This now searches inside the config-driven path
         logging.info("Searching for Gang Run folders for Imposition")
         gang_run_folders = [] 
@@ -346,7 +344,7 @@ def main_workflow():
             logging.warning(f"OneUpFiles directory not found: {s3_files_dir}. Cannot search for Gang Run folders.")
 
 
-        # --- Stage 4: Imposition (Loop) (Unchanged) ---
+        # --- Stage 4: Imposition (Loop) ---
         # Note: This now saves to the config-driven path
         if not gang_run_folders:
             logging.info("No Gang Run folders found. Skipping Imposition stage.")
@@ -364,7 +362,7 @@ def main_workflow():
                 s4_args = [batch_folder, s4_output_dir, json.dumps(s4_config_subset)]
                 run_script(script_paths['impose'], s4_args)
 
-        # --- Stage 5: Send Email Notification (Unchanged) ---
+        # --- Stage 5: Send Email Notification ---
         # Note: This now uses the config-driven paths to find attachments
         logging.info("Starting Stage 5: Email Notification")
         try:
@@ -395,13 +393,13 @@ def main_workflow():
             logging.warning(f"Email notification FAILED: {email_err}")
             logging.warning(traceback.format_exc())
         
-        # --- Workflow Complete (Unchanged) ---
+        # --- Workflow Complete ---
         logging.info("\n\n--- [ WORKFLOW COMPLETE ] ---")
         logging.info("All files are in their final locations.")
 
 
     except (FileNotFoundError, FileExistsError, ValueError) as config_err:
-         print(f"\n\Video_Title: YouTube Video Title\nVideo_URL: https://www.youtube.com/watch?v=VIDEO_ID\nVideo_Summary: Brief summary of the YouTube video content.\n\n--- [ WORKFLOW FAILED - CONFIGURATION/FILE ERROR ] ---")
+         print(f"\\nVideo_Title: YouTube Video Title\\nVideo_URL: https://www.youtube.com/watch?v=VIDEO_ID\\nVideo_Summary: Brief summary of the YouTube video content.\\n\\n--- [ WORKFLOW FAILED - CONFIGURATION/FILE ERROR ] ---")
          print(f"ERROR: {config_err}"); print(traceback.format_exc())
          sys.exit(1) 
     except Exception as e:

@@ -5,7 +5,7 @@ import math
 import traceback
 import sys
 from datetime import datetime
-import argparse  # <-- IMPORT ADDED
+import argparse
 
 # pypdf is used for the core imposition engine due to its robust and memory-efficient object handling.
 from pypdf import PdfReader, PdfWriter, PageObject, Transformation
@@ -189,14 +189,14 @@ def create_slug_line_overlay(profile, batch_name, sheet_num, total_sheets):
     text = hf_conf['text'].replace('[file-name]', batch_name).replace('[page-number]', str(sheet_num)).replace('[page-count]', str(total_sheets))
     c.setFont(font_name_from_json, font_size_from_json)
 
-    # --- NEW: Logic to calculate the vertical center ---
+    # Logic to calculate the vertical center
     # 1. Calculate the rendered width of the text string in points.
     text_width = pdfmetrics.stringWidth(text, font_name_from_json, font_size_from_json)
     
     # 2. Calculate the starting Y-coordinate for perfect centering.
     #    (Page Center) + (Half of the text's length)
     center_y_pos = (profile['paper_height'] / 2) + (text_width / 2)
-    # --- END NEW ---
+
 
     # Updated translate function now uses our calculated center position.
     # The X position (0.25 * inch) remains unchanged as requested.
@@ -248,17 +248,17 @@ def apply_finishing(imposed_writer, profile, batch_name, central_config):
 # ==============================================================================
 # MAIN ORCHESTRATOR
 # ==============================================================================
-def main(batch_folder_to_impose, output_dir, central_config_json): # <-- MODIFIED
+def main(batch_folder_to_impose, output_dir, central_config_json):
     """
     Runs the full imposition process for a single batch folder.
 
     Args:
         batch_folder_to_impose (str): The full path to the batch folder (e.g., '.../input/Batch_01').
         output_dir (str): The full path to the root output folder (e.g., '.../output_final').
-        central_config_json (str): A JSON string containing config paths. <-- MODIFIED
+        central_config_json (str): A JSON string containing config paths.
     """
     
-    # --- MODIFIED: Load config from JSON string ---
+    # Load config from JSON string
     try:
         central_config = json.loads(central_config_json)
         debug_print("✓ Successfully loaded configuration from controller.")

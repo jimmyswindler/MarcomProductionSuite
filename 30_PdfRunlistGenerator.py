@@ -16,7 +16,7 @@ try:
     from reportlab.lib.units import inch
     from reportlab.lib.utils import simpleSplit # For text wrapping
     
-    # --- NEW: Font Registration Imports ---
+    # Font Registration Imports
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
 except ImportError:
@@ -159,7 +159,7 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
     }
     if not all(v['source'] for v in PDF_COLS.values()): print("⚠️ WARNING: PDF column sources missing.")
 
-    # --- NEW v11: Helper function for building fragmentation lines ---
+    # Helper function for building fragmentation lines
     def _build_fragmentation_lines(entities_to_report, store_report_map, sheet_name):
         messages_to_build = set()
         
@@ -205,7 +205,7 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
             
         return sorted(list(messages_to_build))
 
-    # --- NEW v11: Helper function for drawing message blocks ---
+    # Helper function for drawing message blocks
     def draw_message_block(c, lines_to_draw, current_y, font_size, line_height, start_x, drawable_width, page_bottom_y, new_page_callback):
         """
         Draws a block of messages, handling page breaks as needed.
@@ -266,7 +266,7 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
             order_date_str = earliest_order_date.strftime('%a %m/%d/%Y') if pd.notna(earliest_order_date) else "N/A"
             ship_date_str = earliest_ship_date.strftime('%a %m/%d/%Y') if pd.notna(earliest_ship_date) else "N/A"
 
-            # --- Define Layout Metrics ---
+            # --- Respect Minimum Thresholds ---
             header_height, footer_height, row_height, table_header_height = 1.25*inch, 0.5*inch, 0.22*inch, 0.5*inch
             manifest_line_height_factor = 1.2
             
@@ -299,7 +299,7 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
             except Exception as e:
                 print(f"⚠️ PDF Err: Could not sort sheet '{sheet_name}'. {e}"); continue
                 
-            # --- CRITICAL FIX: Initialize pagination state variables ---
+            # Ensure locked fragments are NOT in the pool
             current_row_index = 0
             page_num = 0
             is_continuing_store_box = False
@@ -308,16 +308,14 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
             current_store, current_order, current_job = None, None, None
             entities_in_current_store_box = set() # Holds (store, order, job)
             store_start_y = None # Y-coord of the top of the current store box
-            # --- END CRITICAL FIX ---
+            # --- Cross-page state (the "State Machine") ---
 
 
-            # --- NEW v11: Helper function for drawing headers on a new page ---
+            # Helper function for drawing headers on a new page
             def draw_new_page_headers(page_num):
                 # --- Draw Page Header ---
-                # --- START: FONT MODIFICATION ---
                 label_font, label_size = CUSTOM_FONT_BOLD, 14
                 value_font, value_size = CUSTOM_FONT_BOLD, 22
-                # --- END: FONT MODIFICATION ---
                 y_label = height - margin - 0.5 * inch; y_value = y_label - 30
                 
                 c.setFont(value_font, value_size); max_sheet_name_width = (width / 3) - (2 * header_padding); sheet_name_display = sheet_name
@@ -350,9 +348,7 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
                 
                 # --- Draw Table Header ---
                 font_size_header = 11
-                # --- START: FONT MODIFICATION ---
                 c.setFont(CUSTOM_FONT_BOLD, font_size_header)
-                # --- END: FONT MODIFICATION ---
                 header_line_height = font_size_header * 1.3
                 header_v_center = y_pos - (table_header_height / 2)
                 
@@ -391,9 +387,7 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
                 nonlocal y_pos, page_qty_total_x, page_qty_total_y, page_total_qty
                 
                 if page_qty_total_x is not None:
-                    # --- START: FONT MODIFICATION ---
                     c.setFont(CUSTOM_FONT_BOLD, 11)
-                    # --- END: FONT MODIFICATION ---
                     c.drawCentredString(page_qty_total_x, page_qty_total_y, str(int(page_total_qty)))
                     
                 c.showPage()
@@ -579,7 +573,7 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
                         
                         x_pos += col_width
                     
-                    # --- NEW: Draw Right and Bottom borders for the row ---
+                    # --- Draw Right and Bottom borders for the row ---
                     c.setLineWidth(0.5)
                     c.line(row_line_end_x, y_pos, row_line_end_x, y_pos - row_height) # Right
                     c.line(row_line_start_x, y_pos - row_height, row_line_end_x, y_pos - row_height) # Bottom
@@ -615,13 +609,11 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
                                                           trigger_page_break_for_messages)
 
                 # =================================================================
-                # --- NEW: Stamp Page Total Qty in Header ---
+                # Stamp Page Total Qty in Header
                 # =================================================================
                 if page_qty_total_x is not None and page_qty_total_y is not None:
                     try:
-                        # --- START: FONT MODIFICATION ---
                         c.setFont(CUSTOM_FONT_BOLD, 11)
-                        # --- END: FONT MODIFICATION ---
                         c.drawCentredString(page_qty_total_x, page_qty_total_y, str(int(page_total_qty)))
                     except Exception as e:
                         print(f"Warn: Could not stamp page total. {e}")
@@ -642,11 +634,11 @@ def generate_pdf_run_list(excel_path, pdf_path, config, history, fragmentation_m
         return False
 
 
-# --- MODIFIED main function (from 40_PdfRunlistGenerator.py) ---
+# --- Main Function ---
 def main(bundled_excel_path, output_dir, central_config_json, fragmentation_map_json):
     """
     Main execution function for generating PDF run lists.
-    MODIFIED: Handles loading config, registering fonts, and calls PDF generation.
+    Handles loading config, registering fonts, and calls PDF generation.
     """
     print("\n" + "="*50); print(" PDF RUN LIST GENERATOR SCRIPT (v12.4) ".center(50, "=")); print("="*50 + "\n")
 
@@ -712,7 +704,7 @@ def main(bundled_excel_path, output_dir, central_config_json, fragmentation_map_
         processing_time = time.time() - start_time
         print(f"\n--- Processing Time: {processing_time:.2f} seconds ---")
 
-# --- UPDATED __main__ block (from 30_PdfRunlistGenerator.py) ---
+# --- __main__ block ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="40 - Generate PDF Run Lists from bundled Excel.")
     parser.add_argument("bundled_excel_path", help="Path to the bundled Excel file created by 20a.")

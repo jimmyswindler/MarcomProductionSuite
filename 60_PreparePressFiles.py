@@ -41,7 +41,7 @@ HEADER_PAGE_HEIGHT = 3.75 * 72
 HEADER_TRIM_WIDTH = 2 * 72
 HEADER_TRIM_HEIGHT = 3.5 * 72
 
-# --- FIXED LAYOUT CONSTANTS (Added for Manual Control) ---
+# --- Fixed Layout Constants (Added for Manual Control) ---
 FN_FONT_SIZE = 12         # Filename font size
 QTY_FONT_SIZE = 7         # Total Qty font size
 STORE_FONT_SIZE = 12      # Store number font size
@@ -52,7 +52,7 @@ ICON_HEIGHT = 18          # Height of the box icons
 BLOCK_SPACING = 6         # Vertical gap between component blocks
 LINE_SPACING = 2          # Vertical gap between lines within a block
 
-# --- NEW: Barcode Helper Function (Copied from 40_GenerateJobCollateral.py) ---
+# Barcode Helper Function
 def _create_barcode_pdf_in_memory(data_string, width, height):
     """Generates a Code 128 barcode PDF in memory using ReportLab."""
     buffer = BytesIO()
@@ -172,7 +172,7 @@ def create_header_page(pdf_path, order_number=None, segment=None, total_segments
             barcode_canvas_w = 1.75 * 72 # 126pt
             barcode_x0 = (HEADER_PAGE_WIDTH - barcode_canvas_w) / 2
             
-            # --- NEW: White Background Box for Barcode Scannability ---
+            # White Background Box for Barcode Scannability
             white_box_w = 136
             white_box_h = 20
             white_box_x0 = (HEADER_PAGE_WIDTH - white_box_w) / 2

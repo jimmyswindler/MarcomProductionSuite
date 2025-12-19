@@ -200,7 +200,7 @@ def _create_barcode_pdf_in_memory(data_string, width, height):
     buffer.seek(0)
     return buffer
 
-def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, total_counts_map=None, sheet_name=None, watermark_path=None): # <-- ARGUMENT ADDED
+def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, total_counts_map=None, sheet_name=None, watermark_path=None):
     main_row = ticket_rows[0]
     doc = fitz.open()
     PAGE_W, PAGE_H = fitz.paper_size("letter-l")
@@ -211,7 +211,7 @@ def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, to
     title_style, gang_run_style, sec_style = ("helvetica-bold", 14), ("helvetica-bold", 12), ("helvetica-bold", 14)
     fname_style, fval_style, line_style = ("helvetica-bold", 11), ("helvetica", 11), ("helvetica", 11)
     
-    # --- NEW: Style for the sheet name ---
+    # Style for the sheet name
     sheet_name_style = ("helvetica", 10)
     
     # Use the passed base_job_number for the main ticket identifier
@@ -234,31 +234,30 @@ def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, to
     def draw_header(page, is_first_page=True):
         y_top_line = 0.5 * 72
         
-        # --- MODIFIED: Draw JOB NUMBER (Left) ---
+        # Draw JOB NUMBER (Left)
         page.insert_text(fitz.Point(LEFT_INDENT, y_top_line), f"JOB NUMBER: {ticket_number}", fontname=title_style[0], fontsize=title_style[1])
         
-        # --- MODIFIED: Draw ORDER NUMBER (Center) ---
+        # Draw ORDER NUMBER (Center)
         if order_number_raw:
             order_text = f"ORDER: {order_number_raw}"
             order_text_len = fitz.get_text_length(order_text, fontname=title_style[0], fontsize=title_style[1])
             page.insert_text(fitz.Point((PAGE_W - order_text_len) / 2, y_top_line), order_text, fontname=title_style[0], fontsize=title_style[1])
 
-        # --- MODIFIED: Draw SHIP DATE (Right) ---
+        # Draw SHIP DATE (Right)
         ship_text = f"SHIP DATE: {due_date}" if due_date else "SHIP DATE: TBD"
         ship_text_len = fitz.get_text_length(ship_text, fontname=title_style[0], fontsize=title_style[1])
         page.insert_text(fitz.Point(PAGE_W - RIGHT_INDENT - ship_text_len, y_top_line), ship_text, fontname=title_style[0], fontsize=title_style[1])
         
-        # --- MODIFIED: Replaced gang_run_name with sheet_name ---
+        # Replaced gang_run_name with sheet_name
         if sheet_name:
             page.insert_text(fitz.Point(LEFT_INDENT, 0.75*72), str(sheet_name), fontname=sheet_name_style[0], fontsize=sheet_name_style[1])
         
         if is_first_page:
-            # --- MODIFIED: Barcode section now starts from the right-aligned ship date ---
+            # Barcode section now starts from the right-aligned ship date
             center_x = PAGE_W - RIGHT_INDENT - (ship_text_len / 2)
             y = y_top_line + 20 # Start barcodes below the top line
             barcode_w, barcode_h = 2.0*72, 0.375*72
             
-            # --- MODIFIED: Order Number barcode is still drawn, but the text is different ---
             if order_number: # Use the numeric-only order_number for the barcode
                 try:
                     barcode_x0 = center_x - (barcode_w / 2)
@@ -287,7 +286,7 @@ def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, to
                 except Exception as e:
                     print(f"Error generating cost center barcode: {e}")
             
-            # --- MODIFIED: Use watermark_path argument ---
+            # Use watermark_path argument
             if watermark_path and os.path.exists(watermark_path):
                 try:
                     watermark_w, watermark_h = 1.0*72, 1.0*72
@@ -296,7 +295,7 @@ def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, to
                     page.insert_image(rect, filename=watermark_path)
                 except Exception as e:
                     print(f"Watermark error: {e}")
-            # --- END MODIFICATION ---
+
                     
     def draw_right_aligned(page, text, y, font, size):
         text_len = fitz.get_text_length(text, fontname=font, fontsize=size)
@@ -318,10 +317,10 @@ def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, to
         page.insert_text(fitz.Point(FIELD_VALUE_X, y), clean_text(main_row.get(field, "")), fontname=fval_style[0], fontsize=fval_style[1]); y += 0.25*72
     y += 0.25*72; y = new_page_check(y)
     
-    # --- MODIFIED: Renamed section to "SHIPPING DETAILS" ---
+    # Renamed section to "SHIPPING DETAILS"
     page.insert_text(fitz.Point(LEFT_INDENT, y), "SHIPPING DETAILS", fontname=sec_style[0], fontsize=sec_style[1]); y += 0.25*72
     
-    # --- MODIFIED: Removed "order_number" from this loop ---
+    # Removed "order_number" from this loop
     for field, display_name in [("cost_center", "Cost Center")]:
         y = new_page_check(y)
         draw_right_aligned(page, f"{display_name}:", y, fname_style[0], fname_style[1])
@@ -345,7 +344,7 @@ def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, to
         y = addr_y + 0.05 * 72
     y += 0.25*72; y = new_page_check(y)
     
-    # --- MODIFIED: Use 'job_total_line_items' from the spreadsheet data ---
+    # Use 'job_total_line_items' from the spreadsheet data
     try:
         # Try to get the pre-supplied global total from the new data column
         total_items = int(main_row.get("job_total_line_items"))
@@ -367,7 +366,7 @@ def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, to
     page.insert_text(fitz.Point(LEFT_INDENT, y), header_text, fontname=sec_style[0], fontsize=sec_style[1]); y += 0.25*72
     page.draw_line(fitz.Point(LEFT_INDENT, y), fitz.Point(PAGE_W - RIGHT_INDENT, y)); y += 0.1875*72
 
-    # --- START OF MODIFIED LINE ITEMS SECTION ---
+    # --- Line Items Section ---
     
     # Define line height for wrapping
     line_item_height = 0.2 * 72  # 14.4pt
@@ -376,16 +375,16 @@ def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, to
     x_item_col = LEFT_INDENT
     x_qty_col = LEFT_INDENT + 1.0 * 72
     
-    # --- MODIFIED: This is now the RIGHT-hand edge for labels ---
+    # This is now the RIGHT-hand edge for labels
     x_label_right_edge = x_qty_col + 1.9 * 72
     
     # Calculate value start position based on the LONGEST label ("SKU Desc:") to ensure alignment
     label_width_allowance = fitz.get_text_length("SKU Desc:", fontname=fname_style[0], fontsize=fname_style[1]) + 10
     
-    # --- MODIFIED: Value column X position is based on the label's right edge ---
+    # Value column X position is based on the label's right edge
     x_value_col = x_label_right_edge + 10 # 10-point gap after the right-aligned edge
     
-    # --- NEW: Barcode layout constants ---
+    # Barcode layout constants
     barcode_w = 1.75 * 72
     barcode_h = 0.25 * 72
     barcode_gap = 10
@@ -404,13 +403,13 @@ def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, to
         qty_part = f"Qty: {str(row.get('quantity_ordered', ''))}"
         sku_label, sku_value = "SKU:", str(row.get("sku", ""))
         sku_desc_label, sku_desc_value = "SKU Desc:", clean_text(row.get("sku_description", ""))
-        order_item_id = str(row.get("order_item_id", "")).strip() # NEW: Get order_item_id
+        order_item_id = str(row.get("order_item_id", "")).strip()
 
         # --- Draw static parts (Item and Qty) ---
         page.insert_text(fitz.Point(x_item_col, current_y), item_part, fontname=line_style[0], fontsize=line_style[1])
         page.insert_text(fitz.Point(x_qty_col, current_y), qty_part, fontname=fname_style[0], fontsize=fname_style[1])
 
-        # --- NEW: Draw Barcode (Right Aligned) ---
+        # Draw Barcode (Right Aligned)
         barcode_bottom_y = current_y # Track where the barcode ends
         if order_item_id:
             try:
@@ -433,7 +432,7 @@ def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, to
             except Exception as e:
                 print(f"Error generating line item barcode for {order_item_id}: {e}")
 
-        # --- MODIFIED: Draw SKU Desc (with wrapping) ---
+        # Draw SKU Desc (with wrapping)
         if sku_desc_value:
             # Draw the right-aligned label
             label_w = fitz.get_text_length(sku_desc_label, fontname=fname_style[0], fontsize=fname_style[1])
@@ -453,7 +452,7 @@ def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, to
             
             current_y = line_y + line_item_height # Update current_y to the next available line
 
-        # --- MODIFIED: Draw SKU (with wrapping) ---
+        # Draw SKU (with wrapping)
         if sku_value:
             # Draw the right-aligned label
             label_w = fitz.get_text_length(sku_label, fontname=fname_style[0], fontsize=fname_style[1])
@@ -481,12 +480,12 @@ def generate_ticket_pymupdf(ticket_rows, base_job_number, gang_run_name=None, to
         page.draw_line(fitz.Point(LEFT_INDENT, y), fitz.Point(PAGE_W - RIGHT_INDENT, y)); 
         y += 0.1875*72
     
-    # --- END OF MODIFIED LINE ITEMS SECTION ---
+
     
     y += 0.25*72; y = new_page_check(y)
     page.insert_text(fitz.Point(LEFT_INDENT, y), "PRODUCTION INSTRUCTIONS", fontname=sec_style[0], fontsize=sec_style[1]); y += 0.3*72
     
-    # --- MODIFIED: Removed 'sku_description' ---
+    # Removed 'sku_description'
     instruction_fields = {
         "general_description": "General Desc.",
         "paper_description": "Paper Desc.",
@@ -520,10 +519,9 @@ def download_worker(task):
 
 def process_dataframe(df, files_path, tickets_path, sheet_name, watermark_path=None):
     """
-    MODIFIED: This function now determines if a sheet is a gang run based on its name.
+    This function now determines if a sheet is a gang run based on its name.
     It receives pre-defined paths for all output types.
-    IT NOW PRE-PROCESSES JOB NUMBERS TO EXTRACT A BASE AND SUFFIX FOR GROUPING.
-    This version is for 40a: It does NOT load colors or handle originals.
+    It pre-processes job numbers to extract a base and suffix for grouping.
     """
     is_gang_run = GANG_RUN_TRIGGER in sheet_name.upper()
 
@@ -532,7 +530,7 @@ def process_dataframe(df, files_path, tickets_path, sheet_name, watermark_path=N
     else:
         print(f"\nProcessing sheet '{sheet_name}' as STANDARD jobs.")
 
-    # --- NEW: Pre-processing logic for job_ticket_numbers ---
+    # Pre-processing logic for job_ticket_numbers
     ticket_col_name = "job_ticket_number"
     
     def parse_job_number(job_str):
@@ -549,7 +547,7 @@ def process_dataframe(df, files_path, tickets_path, sheet_name, watermark_path=N
             # No suffix found, treat the whole string as the base
             return job_str, '1'
 
-    # --- MODIFICATION: Replaced the fragile .apply(lambda...) with a more robust method ---
+    # Replaced the fragile .apply(lambda...) with a more robust method
     # Apply the parsing function, which returns a Series of tuples
     parsed_data = df[ticket_col_name].apply(parse_job_number)
     
@@ -560,7 +558,7 @@ def process_dataframe(df, files_path, tickets_path, sheet_name, watermark_path=N
         index=parsed_data.index,
         columns=['base_job_number', 'line_item_suffix'] # Explicitly name columns
     )
-    # --- END MODIFICATION ---
+    # --- End Pre-processing ---
 
     # Calculate total item counts per job ON THIS SHEET using the new base number
     global_counts = df.groupby('base_job_number').size().to_dict()
@@ -574,16 +572,16 @@ def process_dataframe(df, files_path, tickets_path, sheet_name, watermark_path=N
         tickets_path=tickets_path,
         sheet_start_time=start_time,
         total_counts_map=total_counts_map,
-        watermark_path=watermark_path, # <-- Pass config path
+        watermark_path=watermark_path,
         sheet_name=sheet_name
     )
     
     elapsed = time.time() - start_time
     print(f"\nProcessing complete for sheet '{sheet_name}' - Total time: {int(elapsed//3600):02d}:{int((elapsed%3600)//60):02d}:{int(elapsed%60):02d}")
 
-def process_rows(rows, files_path, tickets_path, sheet_start_time=0, total_counts_map=None, watermark_path=None, sheet_name=None): # <-- ARGUMENT ADDED
+def process_rows(rows, files_path, tickets_path, sheet_start_time=0, total_counts_map=None, watermark_path=None, sheet_name=None):
     """
-    MODIFIED: This function (for 40a) ONLY handles downloading and TICKETwPROOFS creation.
+    This function ONLY handles downloading and TICKETwPROOFS creation.
     All press-prep logic (archiving, duplication, rotating, headers) has been REMOVED.
     """
     rows_with_index = list(rows.reset_index().to_dict('records'))
@@ -660,7 +658,7 @@ def process_rows(rows, files_path, tickets_path, sheet_start_time=0, total_count
                 if row['download_status'] == 'success':
                     production_artwork_path = row['downloaded_production_path']
                     
-                    # --- ALL PRESS PREP LOGIC REMOVED ---
+                    # --- Press Prep logic removed ---
                     # No archiving, no duplication, no standardization, no headers.
                     
                     # The proof is ALWAYS generated from the downloaded production file path.
@@ -693,12 +691,13 @@ def process_rows(rows, files_path, tickets_path, sheet_start_time=0, total_count
         finally:
             if final_doc and not final_doc.is_closed: final_doc.close()
 
-# --- MODIFIED main function ---
-def main(input_excel_path, files_base_path, tickets_base_path, central_config_json): # <-- MODIFIED: Changed args
+# --- Main function ---
+def main(input_excel_path, files_base_path, tickets_base_path, central_config_json):
     """
     Main processing function for 50a.
-    MODIFIED: Accepts central_config as JSON string.
-    MODIFIED: Accepts separate paths for FILES and TICKETS.
+    Main processing function.
+    Accepts central_config as JSON string.
+    Accepts separate paths for FILES and TICKETS.
     """
     start_time = time.time()
     filename = os.path.basename(input_excel_path)
@@ -722,7 +721,7 @@ def main(input_excel_path, files_base_path, tickets_base_path, central_config_js
         print("No watermark path provided in config.")
 
     try:
-        # --- MODIFIED: Paths are now passed in directly ---
+        # Paths are now passed in directly
         # No longer creating .../FILES or .../TICKETwPROOFS
         os.makedirs(files_base_path, exist_ok=True)
         os.makedirs(tickets_base_path, exist_ok=True)
@@ -745,7 +744,7 @@ def main(input_excel_path, files_base_path, tickets_base_path, central_config_js
 
             sanitized_sheet_name = sanitize_filename(sheet_name)
             
-            # --- MODIFIED: Sheet paths are now inside the passed-in base paths ---
+            # Sheet paths are now inside the passed-in base paths
             sheet_files_path = os.path.join(files_base_path, sanitized_sheet_name)
             sheet_tickets_path = os.path.join(tickets_base_path, sanitized_sheet_name)
 
@@ -766,11 +765,11 @@ def main(input_excel_path, files_base_path, tickets_base_path, central_config_js
     elapsed = time.time() - start_time
     print(f"\nTotal processing time for file: {int(elapsed//3600):02d}:{int((elapsed%3600)//60):02d}:{int(elapsed%60):02d}")
 
-# --- UPDATED __main__ block ---
+# --- __main__ block ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="50 - Download Artwork and Generate Job Collateral (TICKETwPROOFS).")
     parser.add_argument("input_excel_path", help="Path to the input Excel file.")
-    # --- MODIFIED: Replaced output_base_folder with two specific paths ---
+    # Replaced output_base_folder with two specific paths
     parser.add_argument("files_base_folder", help="Path to the base output folder where FILES subfolders will be created.")
     parser.add_argument("tickets_base_folder", help="Path to the base output folder where TICKET subfolders will be created.")
     # ---
@@ -780,5 +779,5 @@ if __name__ == "__main__":
 
     # --- Pass new arguments to main ---
     print("--- Starting 40: Generate Job Collateral ---")
-    main(args.input_excel_path, args.files_base_folder, args.tickets_base_folder, args.central_config_json) # Pass new paths
+    main(args.input_excel_path, args.files_base_folder, args.tickets_base_folder, args.central_config_json)
     print("--- Finished 40 ---")

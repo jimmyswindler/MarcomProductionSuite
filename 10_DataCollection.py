@@ -7,14 +7,14 @@ import os
 import shutil
 import traceback
 import glob # Keep glob for potential future use, though not needed now
-# --- MODIFIED: Logging/Sys removed ---
+# --- Logging/Sys ---
 import sys
 import json               
 import argparse           
 from typing import List, Dict, Tuple, Any
 from datetime import datetime, timedelta, date # <-- ADDED
 
-# --- Holiday Libraries (Required for Ship Date) --- <-- ADDED
+# --- Holiday Libraries ---
 try:
     import holidays
     from holidays.countries import UnitedStates
@@ -22,14 +22,13 @@ except ImportError:
     print("FATAL ERROR: Required library not found. Please install 'holidays' by running:")
     print("pip install holidays")
     sys.exit(1)
-# --- END ADDED ---
 
-# --- CONFIGURATION (Paths Removed) ---
 
-# --- MODIFIED: PRODUCT_ID_LOG_NAME Removed ---
-# --- REMOVED: ACTIVITY_LOG_NAME, ERROR_LOG_NAME ---
+# --- CONFIGURATION ---
 
-# --- ADDED: Ship Date Calculation Helpers ---
+# --- Log Init Removed ---
+
+# --- Ship Date Calculation Helpers ---
 class CustomUS(UnitedStates):
     def _populate(self, year):
         super()._populate(year)
@@ -58,12 +57,12 @@ def calculate_ship_date(order_date, lead_time_days=5):
         if ship_date_calc.year not in current_holiday_years:
              us_holidays = CustomUS(observed=True, years=ship_date_calc.year)
     return pd.Timestamp(ship_date_calc)
-# --- END ADDED ---
+
 
 # --- Column Order Configuration ---
 PREFERRED_COLUMN_ORDER = [
     'job_ticket_number', 'product_id', 'quantity_ordered', 'order_number', 'order_item_id',
-    'order_date', 'ship_date', # <-- ADDED
+    'order_date', 'ship_date',
     'cost_center', 'sku', 'ship_to_name', 'ship_attn', 'ship_to_company',
     'address1', 'address2', 'address3', 'address4', 'city', 'state', 'zip', 'country',
     'special_instructions', 'product_name', 'general_description', 'paper_description',
@@ -71,7 +70,7 @@ PREFERRED_COLUMN_ORDER = [
     'sku_description', 'product_description', '1-up_output_file_url'
 ]
 
-# --- MODIFIED: Logger Setup REMOVED ---
+# --- Logger Setup Removed ---
 
 def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -84,7 +83,6 @@ def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = new_cols
     return df
 
-# --- MODIFIED: Replaced find_and_load_data ---
 def load_data(file_paths_map: Dict[str, str]) -> Tuple[Dict[str, pd.DataFrame], Dict[str, str]]:
     """
     Loads source XLSX files from the exact paths provided.
@@ -111,7 +109,7 @@ def load_data(file_paths_map: Dict[str, str]) -> Tuple[Dict[str, pd.DataFrame], 
         print(f"Successfully loaded and cleaned: {filename}") # Use print
 
     return dataframes, file_paths_map
-# --- END MODIFICATION ---
+
 
 def preprocess_data(dataframes: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     """
@@ -159,7 +157,7 @@ def finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         df = df.sort_values(by=['job_ticket_number', 'sku'], ascending=True)
     return df
 
-# --- NEW: Function to generate the box_X columns ---
+# --- Function to generate the box_X columns ---
 def generate_box_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     Creates the eight new box_X columns by concatenating the numeric 
@@ -186,7 +184,7 @@ def generate_box_columns(df: pd.DataFrame) -> pd.DataFrame:
         
     print("✓ Box column generation complete.")
     return df
-# --- END NEW FUNCTION ---
+# --- Generator Ends ---
 
 def clean_dataframe_for_output(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -199,7 +197,7 @@ def clean_dataframe_for_output(df: pd.DataFrame) -> pd.DataFrame:
     print("Cleaning complete.") # Use print
     return df_clean
 
-# --- MODIFIED: Removed update_product_id_log function entirely ---
+
 
 def generate_and_log_summary(
     source_files: Dict[str, str],
@@ -232,12 +230,11 @@ def generate_and_log_summary(
             "\n", "==================================================",
             f"--- Consolidation Summary: {datetime.now().strftime('%Y-%m-%d')} ---",
             "PROCESS FAILED.\n", f"- Error Details: {error_details}",
-            # --- MODIFIED: Removed reference to error_log.txt ---
             "==================================================\n"
         ]
         print("\n".join(summary_lines)) # Use print
 
-# --- MODIFIED: Updated main function signature ---
+# --- Main Function ---
 def main(staging_dir: str, file_paths_map: Dict[str, str]) -> None:
     """
     Main function to execute the entire data consolidation pipeline.
@@ -246,14 +243,14 @@ def main(staging_dir: str, file_paths_map: Dict[str, str]) -> None:
         staging_dir: The full path to the single '_STAGING' directory.
         file_paths_map: A dictionary mapping keys to their exact, full file paths.
     """
-    # --- MODIFIED: Removed logging setup ---
+        # --- Logging Setup Removed ---
     print("--- Starting 10_DataCollection Script ---") # Use print
 
     source_files, final_report_df = {}, pd.DataFrame()
     # Removed new_blank_rows initialization
 
     try:
-        # --- MODIFIED: Only one directory to create ---
+        # --- Create staging directory ---
         os.makedirs(staging_dir, exist_ok=True)
 
         # 1. Load data from exact paths
@@ -264,23 +261,21 @@ def main(staging_dir: str, file_paths_map: Dict[str, str]) -> None:
         merged_df = merge_data(all_data)
         final_report_df = finalize_dataframe(merged_df)
         
-        # --- NEW STEP: Generate the box columns ---
+        # --- Generate the box columns ---
         final_report_df = generate_box_columns(final_report_df)
-        # --- END NEW STEP ---
 
         # 3. Dynamic file naming
         output_file_name = f'Consolidated_Report_{datetime.now().strftime("%Y-%m-%d")}.xlsx'
         
-        # --- MODIFIED: Ship Date calculation moved here ---
+        # --- Ship Date calculation ---
         if 'order_date' in final_report_df.columns:
             # First, convert the 'order_date' column
             final_report_df['order_date'] = pd.to_datetime(final_report_df['order_date'], errors='coerce')
             
-            # --- NEW: Calculate Ship Date ---
+            # --- Calculate Ship Date ---
             print("\nCalculating business-aware ship dates...")
             final_report_df['ship_date'] = final_report_df['order_date'].apply(calculate_ship_date)
             print("✓ Ship date calculation complete.")
-            # --- END NEW ---
             
             # Now, use the converted dates for the filename logic
             order_dates = final_report_df['order_date'].dt.date.dropna() # Get dates from the column
@@ -288,10 +283,10 @@ def main(staging_dir: str, file_paths_map: Dict[str, str]) -> None:
                 min_date, max_date = order_dates.min(), order_dates.max()
                 min_date_str, max_date_str = min_date.strftime('%Y-%m-%d'), max_date.strftime('%Y-%m-%d')
                 output_file_name = f'MarcomOrderDate {min_date_str}.xlsx' if min_date == max_date else f'MarcomOrderDate {min_date_str}_to_{max_date_str}.xlsx'
-        # --- END MODIFICATION ---
+
 
         # 4. Construct output paths
-        # --- MODIFIED: Report is now saved to staging_dir ---
+        # --- Report is now saved to staging_dir ---
         output_file_path = os.path.join(staging_dir, output_file_name)
 
         # 5. Workflow: Clean, Save (Removed Log update)
@@ -301,7 +296,7 @@ def main(staging_dir: str, file_paths_map: Dict[str, str]) -> None:
         print(f"\nSuccessfully created the consolidated report: {output_file_path}") # Use print
 
         # 6. Move source files
-        # --- MODIFIED: Source files are now moved to staging_dir ---
+        # --- Move Source Files ---
         print("\n--- Moving Source Files ---") # Use print
         for source_key, source_path in source_files.items(): # Iterate through the map
              if os.path.exists(source_path):
@@ -334,12 +329,12 @@ def main(staging_dir: str, file_paths_map: Dict[str, str]) -> None:
         # Updated call to generate_and_log_summary (Removed numeric argument)
         generate_and_log_summary({}, pd.DataFrame(), "", success=False, error_details=error_details)
         sys.exit(1) # Exit with error code for controller
-# --- END MODIFICATION ---
 
-# --- NEW: Added argparse block ---
+
+# --- Argparse Block ---
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Consolidate order data from three Excel files.")
-    # --- MODIFIED: Replaced output_dir and processed_dir with staging_dir ---
+    # --- Replaced output_dir with staging_dir ---
     parser.add_argument("staging_dir", help="Full path to the single staging directory for all outputs.")
     parser.add_argument("file_paths_map_json", help="JSON string mapping keys ('job_ticket', 'total_order', 'order_ship') to full file paths.")
 
@@ -364,4 +359,3 @@ if __name__ == '__main__':
         staging_dir=args.staging_dir,
         file_paths_map=file_paths_map_dict
     )
-# --- END NEW BLOCK ---

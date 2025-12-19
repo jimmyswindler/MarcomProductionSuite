@@ -44,7 +44,7 @@ def safe_get_list(config_dict, key_path):
 # --- DATA ORGANIZATION (From original 20_DataBundling.py) ---
 def organize_by_product_id(input_file, config):
     """
-    MODIFIED: Handles blank/uncategorized IDs by moving them to an exceptions DataFrame.
+    Handles blank/uncategorized IDs by moving them to an exceptions DataFrame.
     Returns a dictionary: {'categorized': categorized_dfs, 'exceptions': exceptions_df}
     """
     col_names = config.get('column_names', {})
@@ -94,10 +94,8 @@ def organize_by_product_id(input_file, config):
     df[col_pid] = df[col_pid].astype(str).str.strip().str.split('.').str[0]
 
     # --- Handle Blank Product IDs ---
-    # MODIFICATION: This block no longer immediately moves blank IDs to exceptions.
-    # We initialize the exceptions_df and let blanks flow into categorization.
+    # Initialize the exceptions_df and let blanks flow into categorization.
     exceptions_df = pd.DataFrame(columns=df.columns)
-    # --- END MODIFICATION ---
 
     df[col_base_job] = df[col_job].astype(str).str.replace(r'-\d{2}$', '', regex=True)
     if col_base_job in df.columns: df[col_job_total_lines] = df.groupby(col_base_job)[col_base_job].transform('count')
@@ -107,7 +105,6 @@ def organize_by_product_id(input_file, config):
     df_initial_orders = df[col_order].nunique() if col_order in df.columns else 0; df_initial_jobs = df[col_base_job].nunique() if col_base_job in df.columns else 0
     df_initial_rows = len(df); df_initial_qty = df[col_qty].sum() if col_qty in df.columns else 0
     print("\n" + "="*50); print("=       PRE-CATEGORIZATION FILE SUMMARY          ="); print("="*50) # Use print
-    # MODIFICATION: Removed line that mentioned num_blank_pids
     print(f"- Total Unique Orders Found:    {df_initial_orders}"); print(f"- Total Unique Jobs Found:      {df_initial_jobs}") # Use print
     print(f"- Total Line Items (Rows):      {df_initial_rows}"); print(f"- Total Quantity Ordered:       {int(df_initial_qty):,}") # Use print
 
@@ -127,27 +124,23 @@ def organize_by_product_id(input_file, config):
     bc_identifiers = safe_get_list(config, 'categorization_rules.business_card_identifiers')
     bc_ident_regex = '|'.join(re.escape(ident) for ident in bc_identifiers) if bc_identifiers else '(?!)'
     
-    # --- MODIFICATION: Replaced faulty type check ---
     cond_bc_paper = pd.Series(False, index=df.index)
     if col_paper in df.columns:
-        # NEW: Force the column to be a string before checking it.
+        # Force the column to be a string before checking it.
         # This fixes the bug where NaN values caused the type check to fail.
         cond_bc_paper = df[col_paper].astype(str).str.contains(bc_ident_regex, case=False, na=False)
-    # --- END MODIFICATION ---
     
-    # --- MODIFICATION: This logic was corrected in a previous step to point to the correct category ---
     for category_name, id_list in product_id_categories.items():
         if not isinstance(id_list, list) or not id_list: continue
         cond_pid = df[col_pid].isin(id_list)
         # This logic is now: (PID matches) OR (Category is '16ptBusinessCard' AND Paper matches)
         conditions.append(cond_pid | cond_bc_paper if category_name == '16ptBusinessCard' else cond_pid); choices.append(category_name)
-    # --- END MODIFICATION ---
     
     if conditions: df['Category'] = np.select(conditions, choices, default='Uncategorized')
     else: print("WARNING: No valid categories defined in config."); df['Category'] = 'Uncategorized' # Use print
     print("✓ Phase 1 complete.") # Use print
 
-    # --- NEW: Phase 1.5: Blank ID Rescue ---
+    # --- Phase 1.5: Blank ID Rescue ---
     print("\nPhase 1.5: Rescuing 'Uncategorized' items based on paper stock...")
     
     # Create the mask for 'Uncategorized' items
@@ -167,16 +160,13 @@ def organize_by_product_id(input_file, config):
     else:
         print("  - No 'Uncategorized' rows matched the paper stock rescue rule.")
     print("✓ Phase 1.5 complete.")
-    # --- END NEW BLOCK ---
 
     # --- Phase 2: Job-Aware Re-categorization Rules ---
     print("\nPhase 2: Applying re-categorization rules..."); print("- Applying Job-Aware Precedence Rules...") # Use print
     job_categories = df.groupby(col_base_job)['Category'].unique(); mixed_jobs = job_categories[job_categories.apply(len) > 1]
     
-    # --- MODIFICATION: This rule was demoting "rescued" 16pt cards. It is now disabled. ---
-    # jobs_to_uncat = mixed_jobs[mixed_jobs.apply(lambda x: 'Uncategorized' in x)].index
-    # if len(jobs_to_uncat) > 0: print(f"  - Forcing {len(jobs_to_uncat)} mixed jobs (incl. Uncategorized) to 'Uncategorized'."); df.loc[df[col_base_job].isin(jobs_to_uncat), 'Category'] = 'Uncategorized' # Use print
-    # --- END MODIFICATION ---
+    # --- Re-categorize Mixed Jobs ---
+    # jobs_to_uncat logic disabled intentionally.
 
     job_categories = df.groupby(col_base_job)['Category'].unique(); mixed_jobs = job_categories[job_categories.apply(len) > 1] # Re-check
     jobs_to_pod = mixed_jobs[mixed_jobs.apply(lambda x: 'PrintOnDemand' in x and 'Uncategorized' not in x)].index
@@ -184,10 +174,8 @@ def organize_by_product_id(input_file, config):
     
     qty_threshold = config.get('categorization_rules', {}).get('high_quantity_threshold', float('inf'))
     if isinstance(qty_threshold, (int, float)) and col_qty in df.columns and col_base_job in df.columns:
-        # --- MODIFICATION: This rule logic was 'BounceBack'/'BusinessCard', which was too vague.
-        # It should match the actual category names from the config.
+        # Match the actual category names from the config.
         high_qty_mask = (df['Category'].isin(['12ptBounceBack', '16ptBusinessCard'])) & (df[col_qty] > qty_threshold)
-        # --- END MODIFICATION ---
         if high_qty_mask.any():
             jobs_to_move_qty = df.loc[high_qty_mask, col_base_job].unique()
             if len(jobs_to_move_qty) > 0: print(f"- Moving {len(jobs_to_move_qty)} jobs (> {qty_threshold}) to '25up layout'."); df.loc[df[col_base_job].isin(jobs_to_move_qty), 'Category'] = '25up layout' # Use print
@@ -241,7 +229,7 @@ def organize_by_product_id(input_file, config):
 # --- END DATA ORGANIZATION ---
 
 
-# --- NEW Main Function ---
+# --- Main Function ---
 def main(input_excel_path, output_dir, config_path):
     """
     Main execution function for sorting a single file.
@@ -274,7 +262,7 @@ def main(input_excel_path, output_dir, config_path):
         if organized_data is None:
             raise Exception("Data organization failed due to critical error (check logs).")
 
-        # --- NEW: Save all categories to sheets in the checkpoint file ---
+        # --- Save all categories to sheets in the checkpoint file ---
         print(f"\nSaving all categorized sheets to: {final_output_path}")
         
         categorized_dfs = organized_data.get('categorized', {})

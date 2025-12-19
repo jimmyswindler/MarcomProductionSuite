@@ -209,7 +209,7 @@ def _find_perfect_sequential_pack(available_lines_df, col_qty, bundle_search_thr
         for line_idx, line_row in available_lines_df.iterrows():
              line_qty = line_row[col_qty]
              
-             # --- PREVENT SPLIT AT 250 GAP ---
+             # Prevent Split at 250 Gap
              if prevent_split_at_250 and (target_qty - current_bundle_qty == 250) and (line_qty == 250):
                  if df is not None and col_cost_center:
                      store_id = line_row[col_cost_center]
@@ -263,7 +263,7 @@ def _strategy_p0_handle_fragment_lockdown(fragment_df, line_item_pool, job_pool,
     else:
         print(f"    - P0: Fragment needs top-up (Seed: {seed_qty}).")
         
-        # --- GAP 250 LOGIC ---
+        # Gap 250 Logic
         target_needed = preferred_bundle_qty - seed_qty
         if target_needed == 250:
              # 1. Try to find Whole Store of 250
@@ -303,7 +303,7 @@ def _strategy_p0_handle_fragment_lockdown(fragment_df, line_item_pool, job_pool,
             top_up_qty += line_row[col_qty]
             if top_up_qty >= target_needed: break 
         
-        # --- FIX: Respect Minimum Thresholds ---
+        # Respect Minimum Thresholds
         total_potential_qty = seed_qty + top_up_qty
         min_threshold = min(bundle_search_thresholds)
         
@@ -579,7 +579,7 @@ def bundle_primary_entity_sequential(df, start_bundle_num, base_bundle_name, con
         
         if not line_item_pool and not fragment_lockdown_queue: break
         
-        # --- CRITICAL FIX: Ensure locked fragments are NOT in the pool ---
+        # Ensure locked fragments are NOT in the pool
         if fragment_lockdown_queue:
             locked_indices = set()
             for fdf in fragment_lockdown_queue:

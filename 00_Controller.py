@@ -87,7 +87,8 @@ def run_script(script_path, args=None):
             # Print to console directly (utils_ui handles rich printing if enabled)
             # We don't use print_info here to avoid adding "ℹ" to every line of child output
             if utils_ui.console:
-                utils_ui.console.print(line)
+                from rich.text import Text
+                utils_ui.console.print(Text.from_ansi(line))
             else:
                 print(line)
             

@@ -9,7 +9,14 @@ import yaml
 import logging
 import traceback
 import json
+import re
 import utils_ui  # <--- New UI Utility
+
+# --- Helper: Strip ANSI Codes ---
+def strip_ansi(text):
+    """Removes ANSI escape sequences from text."""
+    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    return ansi_escape.sub('', text)
 
 # --- Configuration Loading ---
 def load_config(config_path="config.yaml"):
@@ -84,8 +91,8 @@ def run_script(script_path, args=None):
             else:
                 print(line)
             
-            # Also log to file
-            logging.info(line)
+            # Also log to file - BUT STRIP ANSI CODES FIRST
+            logging.info(strip_ansi(line))
         
         process.wait() 
         logging.info(f"--- End of Output from {script_name} ---")

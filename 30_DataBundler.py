@@ -1,4 +1,4 @@
-# 20b_DataBundler.py
+# 30_DataBundler.py
 import pandas as pd
 import numpy as np
 import os
@@ -10,7 +10,7 @@ import time
 import traceback
 import json
 import argparse
-import utils_ui # <--- New UI Utility
+import utils_ui 
 
 # =========================================================
 # THE BUNDLING CONSTITUTION (IRON LAWS)
@@ -20,11 +20,6 @@ CONSTITUTION = {
         "ENABLED": True,
         "YELLOW_ZONE_START": 18750, 
         "RED_ZONE_START": 5750      
-    },
-    "YIELD_PROTECTION": {
-        "DISALLOW_RUNT_BUNDLES": True, 
-        "MIN_BUNDLE_SIZE": 5750,
-        "SAND_RATIO_REQUIRED": 1.1 
     },
     "INTEGRITY_CHECKS": {
         "VALIDATE_WHOLE_JOBS": True 
@@ -38,7 +33,6 @@ def load_config_from_path(config_path="config.yaml"):
         sys.exit(1)
     try:
         with open(config_path, 'r') as f: config = yaml.safe_load(f)
-        # utils_ui.print_success("Configuration loaded successfully.")
         return config
     except Exception as e:
         utils_ui.print_error(f"Could not parse YAML file: {e}")
@@ -74,26 +68,35 @@ def safe_get_list(config_dict, key_path):
     except: return []
 
 # =========================================================
-# BUNDLING ALGORITHM
+# BUNDLING HELPERS
 # =========================================================
-def rebuild_pools(line_item_indices, df, primary_entity_col, col_base_job, col_qty):
-    entity_pool, job_pool = {}, {}
-    if not line_item_indices: return entity_pool, job_pool
+def rebuild_pools(line_item_indices, df, primary_entity_col, col_qty, col_order, col_base_job):
+    """
+    Groups line items by Entity (Store) and provides hierarchy access.
+    """
+    entity_pool = {}
+    if not line_item_indices: return entity_pool
+    
     pool_df = df.loc[list(line_item_indices)]
+    
     if primary_entity_col in pool_df.columns:
         for entity_id, group in pool_df.groupby(primary_entity_col):
+            # Pre-calculate subgroups for "Giant Slayer" logic
+            orders = {}
+            if col_order:
+                for oid, ogroup in group.groupby(col_order):
+                    jobs = {}
+                    if col_base_job:
+                        for jid, jgroup in ogroup.groupby(col_base_job):
+                            jobs[jid] = {'qty': jgroup[col_qty].sum(), 'indices': jgroup.index.tolist()}
+                    orders[oid] = {'qty': ogroup[col_qty].sum(), 'indices': ogroup.index.tolist(), 'jobs': jobs}
+
             entity_pool[entity_id] = {
                 'Total_Qty': group[col_qty].sum(),
                 'Line_Indices': group.index.tolist(),
-                'Job_IDs': group[col_base_job].unique().tolist()
+                'Orders': orders
             }
-    if col_base_job in pool_df.columns:
-        for job_id, group in pool_df.groupby(col_base_job):
-            job_pool[job_id] = {
-                'Total_Qty': group[col_qty].sum(),
-                'Line_Indices': group.index.tolist()
-            }
-    return entity_pool, job_pool
+    return entity_pool
 
 def _create_filler_rows(gap_qty, config):
     filler_rows = []
@@ -118,17 +121,12 @@ def _create_filler_rows(gap_qty, config):
             row1 = get_filler('BLANK-01'); row2 = get_filler('BLANK-02')
             if row1: filler_rows.append(row1)
             if row2: filler_rows.append(row2)
-        elif gap_qty > 0 and gap_qty % 250 == 0:
-            num_fillers = gap_qty // 250
-            for i in range(num_fillers):
-                filler_id = 'BLANK-01' if (i % 2) == 0 else 'BLANK-02'
-                row = get_filler(filler_id)
-                if row: filler_rows.append(row)
     return pd.DataFrame(filler_rows)
 
 def _create_and_finalize_bundle(line_indices, bundle_name, df, target_qty, config, filler_map, final_bundles_dict):
     if not line_indices: return
     line_indices = list(dict.fromkeys(line_indices))
+    
     bundle_df = df.loc[line_indices].copy()
     actual_qty = bundle_df[config.get('column_names', {}).get('quantity_ordered')].sum()
     preferred_bundle_qty = config.get('bundling_rules', {}).get('preferred_bundle_quantity', 6250)
@@ -145,323 +143,214 @@ def _create_and_finalize_bundle(line_indices, bundle_name, df, target_qty, confi
             
     final_bundles_dict[bundle_name] = bundle_df
 
-def _get_sand_qty(job_pool, sand_threshold=2500):
-    sand_qty = 0
-    for jid, jinfo in job_pool.items():
-        if jinfo['Total_Qty'] <= sand_threshold:
-            sand_qty += jinfo['Total_Qty']
-    return sand_qty
+def _attempt_top_up_with_real_work(current_indices, current_qty, entity_pool, preferred_qty):
+    """
+    Scans the remaining pool for WHOLE stores (Sand) to fill a gap 
+    before resigning to use blanks.
+    """
+    gap = preferred_qty - current_qty
+    if gap <= 0: return current_indices, current_qty
 
-# --- STRATEGIES ---
+    # Find candidates smaller than or equal to gap
+    candidates = [e for e in entity_pool.values() if e['Total_Qty'] <= gap]
+    
+    # Sort largest first to fill gap efficiently
+    candidates.sort(key=lambda x: x['Total_Qty'], reverse=True)
 
-def _find_combination_for_seed(seed_qty, bundle_search_thresholds, job_pool, line_item_pool_indices, df, col_qty, max_combo_d=25):
-    for target_threshold in sorted(bundle_search_thresholds, reverse=True):
-        target_needed = target_threshold - seed_qty
-        if target_needed <= 0: continue
+    top_up_indices = []
+    fill_qty = 0
+    existing_set = set(current_indices)
+
+    for cand in candidates:
+        # Check overlap to ensure we don't pick items already in the bundle
+        if any(idx in existing_set for idx in cand['Line_Indices']): continue
+        
+        if fill_qty + cand['Total_Qty'] <= gap:
+            top_up_indices.extend(cand['Line_Indices'])
+            fill_qty += cand['Total_Qty']
+            existing_set.update(cand['Line_Indices'])
             
-        eligible_jobs = {jid: jinfo for jid, jinfo in job_pool.items() 
-                         if jinfo['Total_Qty'] <= target_needed and 
-                            all(idx in line_item_pool_indices for idx in jinfo['Line_Indices'])}
-        
-        if eligible_jobs:
-            sorted_job_items = sorted(eligible_jobs.items(), key=lambda item: item[0])
-            found_combo_jobs = None
-            for k in range(1, min(len(sorted_job_items) + 1, max_combo_d + 1)):
-                for combo in combinations(sorted_job_items, k):
-                    if sum(item[1]['Total_Qty'] for item in combo) == target_needed:
-                        found_combo_jobs = [item[0] for item in combo]
-                        break
-                if found_combo_jobs: break
-            
-            if found_combo_jobs:
-                combo_indices = [idx for jid in found_combo_jobs for idx in job_pool[jid]['Line_Indices']]
-                return combo_indices, target_threshold
-                
-        available_lines_df = df.loc[list(line_item_pool_indices)].sort_index(ascending=True)
-        available_lines_df = available_lines_df[available_lines_df[col_qty] <= target_needed]
+        if fill_qty == gap: break
 
-        if not available_lines_df.empty and available_lines_df[col_qty].sum() >= target_needed:
-            current_bundle_lines = []
-            current_bundle_qty = 0
-            for line_idx, line_row in available_lines_df.iterrows():
-                line_qty = line_row[col_qty]
-                if current_bundle_qty + line_qty <= target_needed:
-                    current_bundle_lines.append(line_idx)
-                    current_bundle_qty += line_qty
-            if current_bundle_qty == target_needed:
-                return current_bundle_lines, target_threshold
-    return None, None
+    return current_indices + top_up_indices, current_qty + fill_qty
 
-def _find_perfect_sequential_pack(available_lines_df, col_qty, bundle_search_thresholds, df=None, col_cost_center=None, prevent_split_at_250=False):
-    for target_qty in sorted(bundle_search_thresholds, reverse=True):
-        current_bundle_lines = []
-        current_bundle_qty = 0
-        stopped_due_to_split_prevention = False
-        
-        for line_idx, line_row in available_lines_df.iterrows():
-             line_qty = line_row[col_qty]
-             
-             if prevent_split_at_250 and (target_qty - current_bundle_qty == 250) and (line_qty == 250):
-                 if df is not None and col_cost_center:
-                     store_id = line_row[col_cost_center]
-                     store_lines = available_lines_df[available_lines_df[col_cost_center] == store_id]
-                     if store_lines[col_qty].sum() > 250:
-                         stopped_due_to_split_prevention = True
-                         break 
+# =========================================================
+# STRATEGIES (Hierarchy Based)
+# =========================================================
 
-             if current_bundle_qty + line_qty <= target_qty:
-                 current_bundle_lines.append(line_idx)
-                 current_bundle_qty += line_qty
-        
-        if current_bundle_qty == target_qty or stopped_due_to_split_prevention:
-            return current_bundle_lines, target_qty
-    return None, None
-
-def _strategy_p0_handle_fragment_lockdown(fragment_df, line_item_pool, job_pool, entity_pool, df, col_qty,
-                                          bundle_search_thresholds, preferred_bundle_qty, col_cost_center=None):
-    # print("  - Running Priority 0 (TERMINATOR MODE)...")
+def _strategy_0_lockdown(fragment_df, entity_pool, df, col_qty, bundle_search_thresholds, preferred_bundle_qty, min_threshold):
+    """
+    PHASE 0: LOCKDOWN (Consecutive Consumption).
+    If we have a fragment from the queue, we MUST use it as the seed.
+    If the fragment is larger than a bundle (Giant Remnant), we slice it.
+    """
     seed_qty = fragment_df[col_qty].sum()
     seed_indices = fragment_df.index.tolist()
     
+    # A. Handle Oversized Fragments (e.g. 8000 remaining from a 14250 store)
     if seed_qty > preferred_bundle_qty:
-        # print(f"    - P0: Slicing oversized fragment (Qty: {seed_qty}).")
-        current_bundle_lines = []
-        current_bundle_qty = 0
-        lines_df = fragment_df.sort_index(ascending=True)
-        for line_idx, line_row in lines_df.iterrows():
-             line_qty = line_row[col_qty]
-             if current_bundle_qty + line_qty <= preferred_bundle_qty:
-                 current_bundle_lines.append(line_idx); current_bundle_qty += line_qty
-             else: break 
-        if not current_bundle_lines:
-             first_line_idx = lines_df.index[0]
-             current_bundle_lines = [first_line_idx]
-             current_bundle_qty = lines_df.loc[first_line_idx, col_qty]
-        remainder_indices = [idx for idx in seed_indices if idx not in current_bundle_lines]
-        new_fragment_df = df.loc[remainder_indices].copy() if remainder_indices else None
-        final_target_qty = current_bundle_qty if current_bundle_qty in bundle_search_thresholds else preferred_bundle_qty
-        return current_bundle_lines, final_target_qty, new_fragment_df
-
-    elif seed_qty in bundle_search_thresholds:
-        # print(f"    - P0: Fragment perfect match ({seed_qty}).")
-        return seed_indices, seed_qty, None
-
-    else:
-        # print(f"    - P0: Fragment needs top-up (Seed: {seed_qty}).")
-        target_needed = preferred_bundle_qty - seed_qty
-        if target_needed == 250:
-             candidates = [eid for eid, einfo in entity_pool.items() 
-                           if einfo['Total_Qty'] == 250 and 
-                           all(idx in line_item_pool for idx in einfo['Line_Indices'])]
-             if candidates:
-                 eid = candidates[0]
-                 top_up_indices = entity_pool[eid]['Line_Indices']
-                 all_blob_indices = seed_indices + top_up_indices
-                 return all_blob_indices, preferred_bundle_qty, None
-             else:
-                 return seed_indices, preferred_bundle_qty, None
-
-        combo_indices, target_qty_met = _find_combination_for_seed(
-            seed_qty, bundle_search_thresholds, job_pool, line_item_pool, df, col_qty, max_combo_d=25
-        )
+        target = preferred_bundle_qty
+        slice_indices = []
+        current_sum = 0
         
-        if combo_indices:
-             all_bundle_indices = seed_indices + combo_indices
-             return all_bundle_indices, target_qty_met, None
-
-        # Forced Top-Up
-        target_needed = preferred_bundle_qty - seed_qty
-        available_lines_df = df.loc[list(line_item_pool)].sort_index(ascending=True)
-        top_up_indices = []
-        top_up_qty = 0
-        for line_idx, line_row in available_lines_df.iterrows():
-            top_up_indices.append(line_idx)
-            top_up_qty += line_row[col_qty]
-            if top_up_qty >= target_needed: break 
-        
-        total_potential_qty = seed_qty + top_up_qty
-        min_threshold = min(bundle_search_thresholds)
-        
-        if total_potential_qty < min_threshold:
-             # print(f"    - P0: Total available ({total_potential_qty}) < Min Threshold. Aborting.")
-             return None, None, None
-
-        all_blob_indices = seed_indices + top_up_indices
-        all_blob_df = df.loc[all_blob_indices].sort_index(ascending=True)
-        
-        current_bundle_lines = []
-        current_bundle_qty = 0
-        for line_idx, line_row in all_blob_df.iterrows():
-             line_qty = line_row[col_qty]
-             if current_bundle_qty + line_qty <= preferred_bundle_qty:
-                 current_bundle_lines.append(line_idx); current_bundle_qty += line_qty
-             else: break 
-        
-        if not current_bundle_lines and not all_blob_df.empty:
-             first_line_idx = all_blob_df.index[0]
-             current_bundle_lines = [first_line_idx]
-             current_bundle_qty = all_blob_df.loc[first_line_idx, col_qty]
-
-        remainder_indices = [idx for idx in all_blob_indices if idx not in current_bundle_lines]
-        new_fragment_df = df.loc[remainder_indices].copy() if remainder_indices else None
-        final_target_qty = preferred_bundle_qty 
-        
-        return current_bundle_lines, final_target_qty, new_fragment_df
-
-def _strategy_pa_perfect_entities(entity_pool, bundle_search_thresholds):
-    # print("  - Running Priority A...")
-    for target_qty in sorted(bundle_search_thresholds, reverse=True):
-        candidates = [eid for eid, einfo in entity_pool.items() if einfo['Total_Qty'] == target_qty]
-        if candidates:
-            candidates.sort()
-            found_entity_id = candidates[0]
-            line_indices = entity_pool[found_entity_id]['Line_Indices']
-            return line_indices, target_qty
-    return None, None
-
-def _strategy_pb1_split_oversized_entities(entity_pool, job_pool, fragment_lockdown_queue, df, col_qty,
-                                           min_bundle_threshold, preferred_bundle_qty, bundle_search_thresholds,
-                                           total_pool_qty, red_zone_threshold):
-    # print("  - Running Priority B1...")
-    future_pool = total_pool_qty - preferred_bundle_qty
-    if future_pool < red_zone_threshold: return None, None
-
-    eligible_oversized_entities = sorted([
-        (eid, einfo['Total_Qty']) for eid, einfo in entity_pool.items() 
-        if einfo['Total_Qty'] > preferred_bundle_qty and 
-           all(jid in job_pool and job_pool[jid]['Total_Qty'] <= preferred_bundle_qty for jid in einfo['Job_IDs'])
-    ], key=lambda x: x[1], reverse=True)
-    
-    if eligible_oversized_entities:
-        entity_id_to_split, entity_qty = eligible_oversized_entities[0]
-        remainder_est = entity_qty - preferred_bundle_qty
-        while remainder_est > preferred_bundle_qty: remainder_est -= preferred_bundle_qty
-        
-        sand_needed = 0
-        if remainder_est < min_bundle_threshold: sand_needed = min_bundle_threshold - remainder_est
-        
-        available_sand = _get_sand_qty(job_pool)
-        sand_ratio = CONSTITUTION['YIELD_PROTECTION']['SAND_RATIO_REQUIRED']
-        if sand_needed > 0 and available_sand < (sand_needed * sand_ratio): return None, None
-        
-        entity_indices = entity_pool[entity_id_to_split]['Line_Indices']
-        entity_lines_df = df.loc[entity_indices].sort_index(ascending=True)
-        current_bundle_lines, current_bundle_qty = _find_perfect_sequential_pack(entity_lines_df, col_qty, bundle_search_thresholds)
-
-        if not current_bundle_lines: return None, None
-        
-        remainder_indices = [idx for idx in entity_indices if idx not in current_bundle_lines]
-        if remainder_indices:
-            remainder_df = df.loc[remainder_indices].copy()
-            fragment_lockdown_queue.append(remainder_df)
-        
-        return current_bundle_lines, current_bundle_qty
-    return None, None
-
-def _strategy_pb2_split_oversized_jobs(line_item_pool, job_pool, fragment_lockdown_queue, df, col_qty, 
-                                       min_bundle_threshold, preferred_bundle_qty, bundle_search_thresholds,
-                                       total_pool_qty, red_zone_threshold):
-    # print("  - Running Priority B2...")
-    future_pool = total_pool_qty - preferred_bundle_qty
-    if future_pool < red_zone_threshold: return None, None
-
-    oversized_job_items = sorted([
-        (jid, jinfo) for jid, jinfo in job_pool.items() 
-        if jinfo['Total_Qty'] > preferred_bundle_qty
-    ], key=lambda item: item[1]['Total_Qty'], reverse=True)
-    
-    if oversized_job_items:
-        job_id_to_split, job_info_to_split = oversized_job_items[0]
-        job_qty = job_info_to_split['Total_Qty']
-        remainder_est = job_qty - preferred_bundle_qty
-        while remainder_est > preferred_bundle_qty: remainder_est -= preferred_bundle_qty
-        
-        sand_needed = 0
-        if remainder_est < min_bundle_threshold: sand_needed = min_bundle_threshold - remainder_est
-        
-        available_sand = _get_sand_qty(job_pool)
-        sand_ratio = CONSTITUTION['YIELD_PROTECTION']['SAND_RATIO_REQUIRED']
-        if sand_needed > 0 and available_sand < (sand_needed * sand_ratio): return None, None
-        
-        line_indices_to_process = [idx for idx in job_info_to_split['Line_Indices'] if idx in line_item_pool]
-        lines_df = df.loc[line_indices_to_process].sort_index(ascending=True)
-        simulated_bundle_lines, simulated_bundle_qty = _find_perfect_sequential_pack(lines_df, col_qty, bundle_search_thresholds)
-        
-        if not simulated_bundle_lines: return None, None
-
-        simulated_remainder_indices = [idx for idx in line_indices_to_process if idx not in simulated_bundle_lines]
-        if simulated_remainder_indices:
-            remainder_df = df.loc[simulated_remainder_indices].copy()
-            fragment_lockdown_queue.append(remainder_df)
-
-        return simulated_bundle_lines, simulated_bundle_qty
-    return None, None
-
-def _strategy_pb3_perfect_jobs(job_pool, bundle_search_thresholds):
-    # print("  - Running Priority B3...")
-    for target_qty in bundle_search_thresholds:
-        perfect_job_ids = sorted([jid for jid, jinfo in job_pool.items() if jinfo['Total_Qty'] == target_qty])
-        if perfect_job_ids:
-            job_id_to_bundle = perfect_job_ids[0]
-            return job_pool[job_id_to_bundle]['Line_Indices'], target_qty
-    return None, None
-
-def _strategy_pc_combine_entities(entity_pool, bundle_search_thresholds, min_bundle_threshold):
-    # print("  - Running Priority C...")
-    sub_threshold_entities = {eid: einfo for eid, einfo in entity_pool.items() if einfo['Total_Qty'] < min_bundle_threshold}
-    if sub_threshold_entities:
-        sorted_items = sorted(sub_threshold_entities.items(), key=lambda item: item[0])
-        for target_qty in bundle_search_thresholds:
-            for k in range(1, min(len(sorted_items) + 1, 26)):
-                for combo in combinations(sorted_items, k):
-                    if sum(item[1]['Total_Qty'] for item in combo) == target_qty:
-                        line_indices = [idx for eid in [x[0] for x in combo] for idx in entity_pool[eid]['Line_Indices']]
-                        return line_indices, target_qty
-    return None, None
-
-def _strategy_pd1_combine_jobs(job_pool, bundle_search_thresholds, min_bundle_threshold):
-    # print("    - D1: Combining Jobs...")
-    sub_threshold_jobs = {jid: jinfo for jid, jinfo in job_pool.items() if jinfo['Total_Qty'] < min_bundle_threshold}
-    if sub_threshold_jobs:
-        sorted_items = sorted(sub_threshold_jobs.items(), key=lambda item: item[0])
-        for target_qty in bundle_search_thresholds:
-            for k in range(1, min(len(sorted_items) + 1, 26)):
-                for combo in combinations(sorted_items, k):
-                    if sum(item[1]['Total_Qty'] for item in combo) == target_qty:
-                        line_indices = [idx for jid in [x[0] for x in combo] for idx in job_pool[jid]['Line_Indices']]
-                        return line_indices, target_qty
-    return None, None
-
-def _strategy_pd2_greedy_lines(line_item_pool, df, col_qty, bundle_search_thresholds, preferred_bundle_qty, 
-                               fragment_lockdown_queue, col_cost_center):
-    # print("    - D2: Greedy Line Packing...")
-    available_lines_df = df.loc[list(line_item_pool)].sort_index(ascending=True)
-    current_bundle_lines, target_qty = _find_perfect_sequential_pack(
-        available_lines_df, col_qty, bundle_search_thresholds, df, col_cost_center, prevent_split_at_250=True
-    )
-    if current_bundle_lines:
-        if col_cost_center in df.columns:
-            last_idx = current_bundle_lines[-1]
-            last_store_id = df.loc[last_idx, col_cost_center]
+        # Greedy sequential slice of the fragment
+        for idx in seed_indices:
+            val = df.loc[idx, col_qty]
+            if current_sum + val <= target:
+                slice_indices.append(idx)
+                current_sum += val
+            else: break
             
-            pool_indices = set(available_lines_df.index)
-            picked_indices = set(current_bundle_lines)
-            remaining_indices = pool_indices - picked_indices
+        if slice_indices:
+            # We return the slice as the bundle.
+            # The remainder becomes the 'new' fragment to push back to queue.
+            rem_indices = [x for x in seed_indices if x not in slice_indices]
+            new_frag = df.loc[rem_indices].copy()
+            return slice_indices, target, new_frag
+
+    # B. Standard Fragment (<= 6250)
+    # We treat this fragment as the ANCHOR for a bucket sweep.
+    # We will try to fill the rest of the bucket with other stores.
+    
+    # Start the bucket with the fragment
+    current_indices = list(seed_indices)
+    current_qty = seed_qty
+    
+    # Use Bucket Sweep logic to fill the rest from entity_pool
+    # Filter candidates
+    candidates = [e for e in entity_pool.values()]
+    candidates.sort(key=lambda x: x['Total_Qty'], reverse=True)
+    
+    gap = preferred_bundle_qty - current_qty
+    
+    for partner in candidates:
+        if gap == 0: break
+        if partner['Total_Qty'] <= gap:
+            current_indices.extend(partner['Line_Indices'])
+            current_qty += partner['Total_Qty']
+            gap -= partner['Total_Qty']
             
-            if remaining_indices:
-                remainder_mask = available_lines_df.loc[list(remaining_indices), col_cost_center] == last_store_id
-                orphaned_indices = remainder_mask[remainder_mask].index.tolist()
+    # Check if valid bundle size
+    if current_qty in bundle_search_thresholds:
+        return current_indices, current_qty, None
+        
+    # If we failed to hit a perfect threshold with the fragment,
+    # we return what we have. The wrapper will trigger Top-Up to try harder,
+    # or it will eventually settle for a partial bundle + blanks.
+    # But crucially, we consumed the fragment.
+    return current_indices, current_qty, None
+
+
+def _strategy_giant_slayer(entity_pool, df, col_qty, bundle_search_thresholds):
+    """
+    Phase 1: Handle Stores > 6250.
+    Logic: Fragment them down to valid bundles.
+    Priority: Whole Orders -> Whole Jobs -> Lines.
+    Returns the REMAINDER as new_fragment_df to enforce consecutive consumption.
+    """
+    giants = [e for e in entity_pool.values() if e['Total_Qty'] > 6250]
+    if not giants: return None, None, None
+    
+    giants.sort(key=lambda x: x['Total_Qty'], reverse=True)
+    giant = giants[0]
+    
+    for target in sorted(bundle_search_thresholds, reverse=True):
+        
+        # A. Try Whole Orders
+        current_indices = []
+        current_qty = 0
+        sorted_orders = sorted(giant['Orders'].values(), key=lambda x: x['qty'], reverse=True)
+        
+        for order in sorted_orders:
+            if order['qty'] > target:
+                if current_qty == 0:
+                    sorted_jobs = sorted(order['jobs'].values(), key=lambda x: x['qty'], reverse=True)
+                    job_indices = []
+                    job_qty = 0
+                    for job in sorted_jobs:
+                        if job_qty + job['qty'] <= target:
+                            job_indices.extend(job['indices'])
+                            job_qty += job['qty']
+                    
+                    if job_qty == target:
+                        all_giant_indices = set(giant['Line_Indices'])
+                        bundle_set = set(job_indices)
+                        rem_indices = list(all_giant_indices - bundle_set)
+                        new_frag = df.loc[rem_indices].copy()
+                        return job_indices, target, new_frag
+                continue
+
+            if current_qty + order['qty'] <= target:
+                current_indices.extend(order['indices'])
+                current_qty += order['qty']
                 
-                if orphaned_indices:
-                    # print(f"      - D2 ALERT: Locking {len(orphaned_indices)} remainder items.")
-                    remainder_df = df.loc[orphaned_indices].copy()
-                    fragment_lockdown_queue.append(remainder_df)
+        if current_qty == target:
+             all_giant_indices = set(giant['Line_Indices'])
+             bundle_set = set(current_indices)
+             rem_indices = list(all_giant_indices - bundle_set)
+             new_frag = df.loc[rem_indices].copy()
+             return current_indices, target, new_frag
+
+    # Fallback: Slice lines
+    target = 6250
+    slice_indices = []
+    current_qty = 0
+    all_lines = giant['Line_Indices']
+    
+    for idx in all_lines:
+        val = df.loc[idx, col_qty]
+        if current_qty + val <= target:
+            slice_indices.append(idx)
+            current_qty += val
+        else: break
         
-        return current_bundle_lines, target_qty
+    if slice_indices:
+        all_giant_indices = set(giant['Line_Indices'])
+        bundle_set = set(slice_indices)
+        rem_indices = list(all_giant_indices - bundle_set)
+        new_frag = df.loc[rem_indices].copy()
+        return slice_indices, target, new_frag
+
+    return None, None, None
+
+def _strategy_combiner_no_fragmentation(entity_pool, bundle_search_thresholds):
+    """
+    Phase 2: Handle Stores <= 6250.
+    Logic: Combine Whole Stores Only.
+    """
+    candidates = [e for e in entity_pool.values() if e['Total_Qty'] <= 6250]
+    candidates.sort(key=lambda x: x['Total_Qty'], reverse=True)
+    
+    for target in sorted(bundle_search_thresholds, reverse=True):
+        
+        for i, anchor in enumerate(candidates):
+            current_indices = []
+            current_qty = 0
+            
+            if anchor['Total_Qty'] > target: continue
+            
+            current_indices.extend(anchor['Line_Indices'])
+            current_qty += anchor['Total_Qty']
+            
+            if current_qty == target:
+                return current_indices, target
+            
+            gap = target - current_qty
+            potential_partners = candidates[i+1:]
+            
+            for partner in potential_partners:
+                if partner['Total_Qty'] <= gap:
+                    current_indices.extend(partner['Line_Indices'])
+                    current_qty += partner['Total_Qty']
+                    gap -= partner['Total_Qty']
+                    
+                    if gap == 0:
+                        return current_indices, target
+
     return None, None
 
 # =========================================================
-# ORCHESTRATOR
+# ORCHESTRATOR LEVEL 1: PRIMARY ENTITY LOOP
 # =========================================================
 def bundle_primary_entity_sequential(df, start_bundle_num, base_bundle_name, config, category_name, bundle_rules, 
                                      initial_stats, primary_entity_col, preferred_bundle_qty, bundle_search_thresholds, filler_map, master_tracking_list, disqualified_indices):
@@ -469,26 +358,22 @@ def bundle_primary_entity_sequential(df, start_bundle_num, base_bundle_name, con
     
     bundle_name_suffix = bundle_rules.get('bundle_name_suffix')
     leftover_destination = bundle_rules.get('leftover_sheet_name')
-    MIN_BUNDLE_THRESHOLD = min(bundle_search_thresholds)
-    SORTED_THRESHOLDS = sorted(bundle_search_thresholds, reverse=True)
+    MIN_BUNDLE_THRESHOLD = min(bundle_search_thresholds) # Should be 5750
     
     col_names = config.get('column_names', {})
     col_qty = col_names.get('quantity_ordered')
     col_cost_center = col_names.get('cost_center')
+    col_order = col_names.get('order_number')
     col_base_job = col_names.get('base_job_ticket_number')
     col_job_ticket_num = col_names.get('job_ticket_number')
 
     stats = initial_stats.get(category_name, {})
     final_bundles, row_destinations = {}, {}
     bundle_counter = start_bundle_num
-    original_indices = df.index.tolist(); line_item_pool = set(df.index)
-    fragment_lockdown_queue = []
     
-    entity_pool, job_pool = rebuild_pools(line_item_pool, df, primary_entity_col, col_base_job, col_qty)
+    line_item_pool = set(df.index)
+    fragment_lockdown_queue = [] # Stores DFs of splits that must be used next
     
-    RED_ZONE = CONSTITUTION['FUEL_GAUGE']['RED_ZONE_START']
-    YELLOW_ZONE = CONSTITUTION['FUEL_GAUGE']['YELLOW_ZONE_START']
-
     def get_next_bundle_name():
         nonlocal bundle_counter
         name = f"{bundle_name_suffix}{bundle_counter:03d}"; bundle_counter += 1
@@ -500,166 +385,123 @@ def bundle_primary_entity_sequential(df, start_bundle_num, base_bundle_name, con
         master_tracking_list.append(subset)
         [row_destinations.setdefault(idx, dest) for idx in indices]
 
-    MAX_PASSES = 1000; outer_pass_num = 0
+    def get_pool():
+         return rebuild_pools(line_item_pool, df, primary_entity_col, col_qty, col_order, col_base_job)
+
+    MAX_PASSES = 3000
+    outer_pass_num = 0
+    
     with utils_ui.create_progress() as progress:
-        task = progress.add_task(f"Bundling {category_name}...", total=None) # Indeterminate because we don't know total passes
+        task = progress.add_task(f"Bundling {category_name}...", total=None) 
         
         while outer_pass_num < MAX_PASSES:
             outer_pass_num += 1
-            bundle_made = False
             progress.update(task, description=f"Bundling {category_name} (Pass {outer_pass_num})")
             
             if not line_item_pool and not fragment_lockdown_queue: break
             
+            # 1. Update Pool Total (Safety Check)
+            current_pool_total = df.loc[list(line_item_pool), col_qty].sum() if line_item_pool else 0
             if fragment_lockdown_queue:
-                locked_indices = set()
-                for fdf in fragment_lockdown_queue: locked_indices.update(fdf.index)
-                line_item_pool.difference_update(locked_indices)
-
-            run_only_p0 = bool(fragment_lockdown_queue)
-            entity_pool, job_pool = rebuild_pools(line_item_pool, df, primary_entity_col, col_base_job, col_qty)
-            current_pool_qty = df.loc[list(line_item_pool), col_qty].sum() if line_item_pool else 0
+                current_pool_total += sum([f[col_qty].sum() for f in fragment_lockdown_queue])
+                
+            if not fragment_lockdown_queue and current_pool_total < 5750: 
+                break
+                
+            # 2. Rebuild Pool
+            entity_pool = get_pool()
             
-            allow_splitting = True
-            if not run_only_p0:
-                if current_pool_qty < RED_ZONE:
-                    bundled_stores = set()
-                    for b in final_bundles.values():
-                        if not b.empty and col_cost_center in b.columns:
-                            data_only = b[~b[col_job_ticket_num].astype(str).str.startswith('BLANK-')]
-                            bundled_stores.update(data_only[col_cost_center].unique())
-                    
-                    pool_df = df.loc[list(line_item_pool)]
-                    pool_stores = set(pool_df[col_cost_center].unique())
-                    stranded_stores = bundled_stores.intersection(pool_stores)
-                    
-                    if stranded_stores:
-                        rescue_indices = pool_df[pool_df[col_cost_center].isin(stranded_stores)].index.tolist()
-                        if rescue_indices:
-                            rescue_df = df.loc[rescue_indices].copy()
-                            fragment_lockdown_queue.append(rescue_df)
-                            line_item_pool.difference_update(rescue_indices) 
-                            continue 
-                    break
-                    
-                if current_pool_qty < YELLOW_ZONE: allow_splitting = False
-
-            # --- STRATEGIES ---
+            bundle_indices = None
+            target_hit = 0
+            new_frag_df = None
+            
+            # --- PHASE 0: LOCKDOWN (Queue Priority) ---
             if fragment_lockdown_queue:
-                fragment_df = fragment_lockdown_queue.pop(0)
-                b_indices, t_qty, new_frag = _strategy_p0_handle_fragment_lockdown(
-                    fragment_df, line_item_pool, job_pool, entity_pool, df, col_qty, SORTED_THRESHOLDS, preferred_bundle_qty, col_cost_center
+                frag_df = fragment_lockdown_queue.pop(0)
+                # Ensure fragment indices are not in entity pool (they shouldn't be)
+                bundle_indices, target_hit, new_frag_df = _strategy_0_lockdown(
+                    frag_df, entity_pool, df, col_qty, bundle_search_thresholds, preferred_bundle_qty, MIN_BUNDLE_THRESHOLD
                 )
-                if b_indices:
-                    bname = get_next_bundle_name()
-                    _create_and_finalize_bundle(b_indices, bname, df, t_qty, config, filler_map, final_bundles)
-                    log_destination(b_indices, bname)
-                    line_item_pool.difference_update(b_indices)
-                    if new_frag is not None and not new_frag.empty: fragment_lockdown_queue.insert(0, new_frag)
-                    bundle_made = True; continue
-                else:
-                    line_item_pool.update(fragment_df.index)
-                    continue
+            else:
+                # --- PHASE 1: GIANT SLAYER (Fragmentation Allowed) ---
+                has_giants = any(e['Total_Qty'] > 6250 for e in entity_pool.values())
+                
+                if has_giants:
+                     bundle_indices, target_hit, new_frag_df = _strategy_giant_slayer(entity_pool, df, col_qty, bundle_search_thresholds)
+                
+                # --- PHASE 2: COMBINER (No Fragmentation) ---
+                if not bundle_indices:
+                     bundle_indices, target_hit = _strategy_combiner_no_fragmentation(entity_pool, bundle_search_thresholds)
             
-            if run_only_p0: continue
-
-            pipeline = [lambda: _strategy_pa_perfect_entities(entity_pool, SORTED_THRESHOLDS)]
-            if allow_splitting:
-                pipeline.extend([
-                    lambda: _strategy_pb1_split_oversized_entities(entity_pool, job_pool, fragment_lockdown_queue, df, col_qty, MIN_BUNDLE_THRESHOLD, preferred_bundle_qty, SORTED_THRESHOLDS, current_pool_qty, RED_ZONE),
-                    lambda: _strategy_pb2_split_oversized_jobs(line_item_pool, job_pool, fragment_lockdown_queue, df, col_qty, MIN_BUNDLE_THRESHOLD, preferred_bundle_qty, SORTED_THRESHOLDS, current_pool_qty, RED_ZONE)
-                ])
-            pipeline.extend([
-                lambda: _strategy_pb3_perfect_jobs(job_pool, SORTED_THRESHOLDS),
-                lambda: _strategy_pc_combine_entities(entity_pool, SORTED_THRESHOLDS, MIN_BUNDLE_THRESHOLD),
-                lambda: _strategy_pd1_combine_jobs(job_pool, SORTED_THRESHOLDS, MIN_BUNDLE_THRESHOLD),
-                lambda: _strategy_pd2_greedy_lines(line_item_pool, df, col_qty, SORTED_THRESHOLDS, preferred_bundle_qty, fragment_lockdown_queue, col_cost_center)
-            ])
-
-            for strat in pipeline:
-                b_indices, t_qty = strat()
-                if b_indices:
-                    bname = get_next_bundle_name()
-                    _create_and_finalize_bundle(b_indices, bname, df, t_qty, config, filler_map, final_bundles)
-                    log_destination(b_indices, bname)
-                    line_item_pool.difference_update(b_indices)
-                    bundle_made = True; break
+            # --- PHASE 3: TOP-UP (Priority Use of Real Work) ---
+            if bundle_indices:
+                if target_hit < preferred_bundle_qty:
+                    # Scan remaining entity pool for small stores to fill gap
+                    # Note: entity_pool is still valid because we haven't committed indices yet
+                    bundle_indices, target_hit = _attempt_top_up_with_real_work(
+                        bundle_indices, target_hit, entity_pool, preferred_bundle_qty
+                    )
             
-            if not bundle_made: break
+            # 4. Finalize
+            if bundle_indices:
+                bname = get_next_bundle_name()
+                _create_and_finalize_bundle(bundle_indices, bname, df, target_hit, config, filler_map, final_bundles)
+                log_destination(bundle_indices, bname)
+                
+                line_item_pool.difference_update(bundle_indices)
+                
+                # CRITICAL: If Giant Slayer or Lockdown returned a remainder, 
+                # immediately queue it to force consecutive consumption.
+                if new_frag_df is not None and not new_frag_df.empty:
+                    # Remove fragment indices from general pool
+                    line_item_pool.difference_update(new_frag_df.index)
+                    # Push to front of queue
+                    fragment_lockdown_queue.insert(0, new_frag_df)
+            else:
+                break
 
     # --- FINALIZE ---
     all_bundled_indices = set()
     for bundle_df in final_bundles.values(): all_bundled_indices.update(bundle_df.index)
-    
+            
+    # Recover stranded fragments
     if fragment_lockdown_queue:
         for fdf in fragment_lockdown_queue:
-            unbundled_fragment_indices = set(fdf.index) - all_bundled_indices
-            line_item_pool.update(unbundled_fragment_indices)
-    
+            line_item_pool.update(fdf.index)
+
     leftovers = df.loc[list(line_item_pool)].copy()
     if not leftovers.empty:
         log_destination(leftovers.index.tolist(), leftover_destination)
 
-    bundled_rows = sum(len(b) for b in final_bundles.values())
     bundled_qty = sum(b.loc[~b[col_job_ticket_num].astype(str).str.startswith('BLANK-'), col_qty].sum() for b in final_bundles.values())
-    leftover_rows = len(leftovers); leftover_qty = leftovers[col_qty].sum() if not leftovers.empty else 0
+    leftover_qty = leftovers[col_qty].sum() if not leftovers.empty else 0
     
     utils_ui.print_info(f"Summary ({category_name}): {len(final_bundles)} bundles ({int(bundled_qty):,} qty) | Leftovers: {int(leftover_qty):,} qty")
     
     return final_bundles, leftovers, bundle_counter, stats
 
-def _build_hierarchical_frag_map(master_df, col_cost_center, col_order_num, col_base_job, immune_stores):
-    store_report, unclaimed = {}, {"orders": {}, "jobs": {}}
-    if master_df.empty or 'Destination' not in master_df.columns: 
-        return {"store_report_map": store_report, "unclaimed_report_map": unclaimed}
+# =========================================================
+# VALIDATION FUNCTIONS
+# =========================================================
+def validate_bundles(all_bundles, config):
+    utils_ui.print_section("Mix Validation")
+    bb = safe_get_list(config, 'product_ids.12ptBounceBack')
+    bc = safe_get_list(config, 'categorization_rules.business_card_identifiers')
+    bc_reg = '|'.join(re.escape(i) for i in bc) if bc else '(?!)'
+    col_pid = config.get('column_names', {}).get('product_id')
+    col_desc = config.get('column_names', {}).get('paper_description')
+    col_job = config.get('column_names', {}).get('job_ticket_number')
+
+    for n, b in all_bundles.items():
+        val = b[~b[col_job].astype(str).str.startswith('BLANK-')] if col_job in b.columns else b
+        if val.empty: continue
+        has_bb = val[col_pid].astype(str).isin(bb).any() if col_pid in val.columns else False
+        has_bc = val[col_desc].str.contains(bc_reg, case=False).any() if col_desc in val.columns and pd.api.types.is_string_dtype(val[col_desc]) else False
+        if has_bb and has_bc: utils_ui.print_error(f"Mix Error in {n}"); return False
     
-    EXEMPT_DESTS = {'PrintOnDemand', 'LargeFormat', 'Outsource', 'Apparel', 'Promo', 'Unknown', '25up layout'}
-    
-    if '__IS_DISQUALIFIED' in master_df.columns: analysis_df = master_df[master_df['__IS_DISQUALIFIED'] != True].copy()
-    else: analysis_df = master_df.copy()
+    utils_ui.print_success("Mix Validation Passed.")
+    return True
 
-    def _get_status(dests):
-        valid = set(dests) - {'Unknown'}
-        bundles = {d for d in valid if d not in EXEMPT_DESTS and not d.endswith('BounceBack') and not d.endswith('BusinessCard')}
-        leftovers = {d for d in valid if d.endswith('BounceBack') or d.endswith('BusinessCard')}
-        is_frag = False
-        if len(bundles) > 1: is_frag = True
-        if len(bundles) > 0 and len(leftovers) > 0: is_frag = True
-        return is_frag, list(valid)
-
-    entity_dests = {
-        'store': analysis_df.groupby(col_cost_center)['Destination'].apply(set),
-        'order': analysis_df.groupby(col_order_num)['Destination'].apply(set),
-        'job': analysis_df.groupby(col_base_job)['Destination'].apply(set)
-    }
-    
-    status = {k: {id: _get_status(d) for id, d in v.items()} for k, v in entity_dests.items()}
-    frag_stores = {sid for sid, (is_frag, _) in status['store'].items() if is_frag and sid not in immune_stores}
-    claimed_orders, claimed_jobs = set(), set()
-
-    for sid, sgroup in master_df[master_df[col_cost_center].isin(frag_stores)].groupby(col_cost_center):
-        _, s_dests = status['store'].get(sid); s_entry = {"is_fragmented": True, "destinations": s_dests, "fragmented_orders": {}}
-        for oid, ogroup in sgroup.groupby(col_order_num):
-            o_frag, o_dests = status['order'].get(oid, (False, [])); claimed_orders.add(oid); o_entry = {"is_fragmented": o_frag, "destinations": o_dests, "fragmented_jobs": {}}
-            for jid, _ in ogroup.groupby(col_base_job):
-                j_frag, j_dests = status['job'].get(jid, (False, [])); claimed_jobs.add(jid); o_entry["fragmented_jobs"][jid] = {"is_fragmented": j_frag, "destinations": j_dests}
-            s_entry["fragmented_orders"][oid] = o_entry
-        store_report[sid] = s_entry
-    
-    for oid, (is_frag, dests) in status['order'].items():
-        if is_frag and oid not in claimed_orders:
-             entry = {"is_fragmented": True, "destinations": dests, "fragmented_jobs": {}}
-             for jid in master_df[master_df[col_order_num] == oid][col_base_job].unique():
-                 jf, jd = status['job'].get(jid, (False, [])); entry["fragmented_jobs"][jid] = {"is_fragmented": jf, "destinations": jd}
-             unclaimed["orders"][oid] = entry
-    for jid, (is_frag, dests) in status['job'].items():
-        if is_frag and jid not in claimed_jobs: unclaimed["jobs"][jid] = {"is_fragmented": True, "destinations": dests}
-
-    return {"store_report_map": store_report, "unclaimed_report_map": unclaimed}
-
-# ======================
-# VALIDATION
-# ======================
 def validate_constitution(all_bundles, output_sheets, config, immune_stores):
     utils_ui.print_section("Constitution Check")
     col_cost = config.get('column_names', {}).get('cost_center')
@@ -710,17 +552,6 @@ def validate_constitution(all_bundles, output_sheets, config, immune_stores):
         else:
              utils_ui.print_success("Whole Job Law Passed.")
 
-    if CONSTITUTION['YIELD_PROTECTION']['DISALLOW_RUNT_BUNDLES']:
-        min_sz = CONSTITUTION['YIELD_PROTECTION']['MIN_BUNDLE_SIZE']
-        runt_errors = []
-        for n, b in all_bundles.items():
-            total_qty = b[col_qty].sum()
-            if total_qty < min_sz: runt_errors.append(f"Bundle '{n}' ({total_qty})")
-        if runt_errors:
-            errors.append(f"IRON LAW VIOLATION: Runt Bundles detected: {', '.join(runt_errors)}")
-        else:
-            utils_ui.print_success("Min Bundle Law Passed.")
-
     if errors:
         utils_ui.print_error("CONSTITUTIONAL FAILURE")
         for e in errors: utils_ui.print_error(f"{e}")
@@ -733,28 +564,58 @@ def validate_constitution(all_bundles, output_sheets, config, immune_stores):
     utils_ui.print_success("Constitution Passed.")
     return True, []
 
-def validate_bundles(all_bundles, config):
-    utils_ui.print_section("Mix Validation")
-    bb = safe_get_list(config, 'product_ids.12ptBounceBack')
-    bc = safe_get_list(config, 'categorization_rules.business_card_identifiers')
-    bc_reg = '|'.join(re.escape(i) for i in bc) if bc else '(?!)'
-    col_pid = config.get('column_names', {}).get('product_id')
-    col_desc = config.get('column_names', {}).get('paper_description')
-    col_job = config.get('column_names', {}).get('job_ticket_number')
-
-    for n, b in all_bundles.items():
-        val = b[~b[col_job].astype(str).str.startswith('BLANK-')] if col_job in b.columns else b
-        if val.empty: continue
-        has_bb = val[col_pid].astype(str).isin(bb).any() if col_pid in val.columns else False
-        has_bc = val[col_desc].str.contains(bc_reg, case=False).any() if col_desc in val.columns and pd.api.types.is_string_dtype(val[col_desc]) else False
-        if has_bb and has_bc: utils_ui.print_error(f"Mix Error in {n}"); return False
+def _build_hierarchical_frag_map(master_df, col_cost_center, col_order_num, col_base_job, immune_stores):
+    store_report, unclaimed = {}, {"orders": {}, "jobs": {}}
+    if master_df.empty or 'Destination' not in master_df.columns: 
+        return {"store_report_map": store_report, "unclaimed_report_map": unclaimed}
     
-    utils_ui.print_success("Mix Validation Passed.")
-    return True
+    EXEMPT_DESTS = {'PrintOnDemand', 'LargeFormat', 'Outsource', 'Apparel', 'Promo', 'Unknown', '25up layout'}
+    
+    if '__IS_DISQUALIFIED' in master_df.columns: analysis_df = master_df[master_df['__IS_DISQUALIFIED'] != True].copy()
+    else: analysis_df = master_df.copy()
 
-# ======================
-# MAIN
-# ======================
+    def _get_status(dests):
+        valid = set(dests) - {'Unknown'}
+        bundles = {d for d in valid if d not in EXEMPT_DESTS and not d.endswith('BounceBack') and not d.endswith('BusinessCard')}
+        leftovers = {d for d in valid if d.endswith('BounceBack') or d.endswith('BusinessCard')}
+        is_frag = False
+        if len(bundles) > 1: is_frag = True
+        if len(bundles) > 0 and len(leftovers) > 0: is_frag = True
+        return is_frag, list(valid)
+
+    entity_dests = {
+        'store': analysis_df.groupby(col_cost_center)['Destination'].apply(set),
+        'order': analysis_df.groupby(col_order_num)['Destination'].apply(set),
+        'job': analysis_df.groupby(col_base_job)['Destination'].apply(set)
+    }
+    
+    status = {k: {id: _get_status(d) for id, d in v.items()} for k, v in entity_dests.items()}
+    frag_stores = {sid for sid, (is_frag, _) in status['store'].items() if is_frag and sid not in immune_stores}
+    claimed_orders, claimed_jobs = set(), set()
+
+    for sid, sgroup in master_df[master_df[col_cost_center].isin(frag_stores)].groupby(col_cost_center):
+        _, s_dests = status['store'].get(sid); s_entry = {"is_fragmented": True, "destinations": s_dests, "fragmented_orders": {}}
+        for oid, ogroup in sgroup.groupby(col_order_num):
+            o_frag, o_dests = status['order'].get(oid, (False, [])); claimed_orders.add(oid); o_entry = {"is_fragmented": o_frag, "destinations": o_dests, "fragmented_jobs": {}}
+            for jid, _ in ogroup.groupby(col_base_job):
+                j_frag, j_dests = status['job'].get(jid, (False, [])); claimed_jobs.add(jid); o_entry["fragmented_jobs"][jid] = {"is_fragmented": j_frag, "destinations": j_dests}
+            s_entry["fragmented_orders"][oid] = o_entry
+        store_report[sid] = s_entry
+    
+    for oid, (is_frag, dests) in status['order'].items():
+        if is_frag and oid not in claimed_orders:
+             entry = {"is_fragmented": True, "destinations": dests, "fragmented_jobs": {}}
+             for jid in master_df[master_df[col_order_num] == oid][col_base_job].unique():
+                 jf, jd = status['job'].get(jid, (False, [])); entry["fragmented_jobs"][jid] = {"is_fragmented": jf, "destinations": jd}
+             unclaimed["orders"][oid] = entry
+    for jid, (is_frag, dests) in status['job'].items():
+        if is_frag and jid not in claimed_jobs: unclaimed["jobs"][jid] = {"is_fragmented": True, "destinations": dests}
+
+    return {"store_report_map": store_report, "unclaimed_report_map": unclaimed}
+
+# =========================================================
+# ORCHESTRATOR LEVEL 2: MAIN CONTROLLER
+# =========================================================
 def run_bundling_process(categorized_data_sheets, output_file, config):
     col_names = config.get('column_names', {})
     if not all(k in col_names for k in ['order_number', 'job_ticket_number', 'quantity_ordered', 'cost_center', 'base_job_ticket_number']):
